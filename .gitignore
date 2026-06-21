@@ -1,0 +1,54 @@
+# IDE 本地数据
+.codebuddy/
+.codex/
+.claude/
+.idea/
+.vscode/
+
+.rules
+*.swp
+*.swo
+*~
+
+# Deepmate 本地运行数据和用户私有 profile
+.deepmate/
+var/
+
+# 本地环境和密钥
+.env
+.env.*
+!.env.example
+!.env.template
+*.local
+
+# Internal docs are not part of the public source tree
+docs/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
+
+# Python 虚拟环境
+.venv/
+venv/
+env/
+
+# Python 构建产物
+*.egg-info/
+*.egg
+dist/
+build/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Node frontend dependencies
+pet_ui/node_modules/

@@ -1,0 +1,49 @@
+[project]
+name = "deepmate"
+version = "0.1.0"
+description = "A lightweight long-task personal agent harness."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Deepmate contributors" },
+]
+keywords = [
+  "agent",
+  "automation",
+  "coding-assistant",
+  "task-management",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Software Development",
+]
+dependencies = [
+  "textual>=0.60",
+]
+
+[project.urls]
+Homepage = "https://github.com/kevin0x5/deepmate"
+Repository = "https://github.com/kevin0x5/deepmate"
+Issues = "https://github.com/kevin0x5/deepmate/issues"
+
+[project.scripts]
+deepmate = "deepmate.channels.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+deepmate = ["builtin_skills/*/SKILL.md"]

@@ -1,0 +1,17 @@
+{
+  "name": "deepmate-pet-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deepmate desktop pet frontend.",
+  "author": "Deepmate contributors",
+  "license": "MIT",
+  "main": "electron/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron electron/main.js",
+    "smoke": "node electron/main.js --help"
+  },
+  "devDependencies": {
+    "electron": "^41.7.1"
+  }
+}

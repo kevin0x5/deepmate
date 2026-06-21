@@ -1,0 +1,77 @@
+runtime:
+  data_dir: var
+  active_profile: default
+  tool_repair:
+    enabled: true
+    reasoning_scavenge: true
+    argument_repair: true
+    max_identical_tool_calls: 2
+    max_similar_tool_calls: 2
+  tool_output:
+    compaction_enabled: true
+    lossless_normalization: true
+    small_output_ratio: 0.0025
+    medium_output_ratio: 0.01
+    huge_output_ratio: 0.03
+    compact_target_ratio: 0.003
+  loop_guard:
+    enabled: true
+    hard_step_cap: 100
+
+trace:
+  sink: var/traces/trace.jsonl
+
+observability:
+  otlp:
+    endpoint:
+    headers:
+    service_name: deepmate
+    service_version: 0.112.0
+    # Langfuse Cloud example:
+    # endpoint: https://cloud.langfuse.com/api/public/otel
+    # headers: Authorization=Basic ${LANGFUSE_AUTH_STRING},x-langfuse-ingestion-version=4
+
+provider:
+  default: deepseek
+  retry:
+    max_attempts: 2
+    initial_delay_seconds: 0.5
+
+model_context_windows:
+  default: 1000000
+  deepseek-v4-flash: 1000000
+  deepseek-v4-pro: 1000000
+
+context:
+  response_token_reserve: 64000
+  safety_margin_tokens: 50000
+  history_token_budget_ratio: 0.75
+  hot_profile_budget_ratio: 0.005
+  hot_profile_warn_ratio: 0.8
+  hot_profile_min_tokens: 800
+  hot_profile_max_tokens: 6000
+  history_window_mode: warn
+  protect_recent_items: 40
+
+subagents:
+  max_child_runs: 4
+  max_revise_attempts: 1
+  max_child_steps: 12
+  revise_step_extension: 2
+
+models:
+  memory:
+    model: deepseek-v4-flash
+    thinking: disabled
+    temperature: 0
+    max_tokens: 1200
+  summary:
+    model: deepseek-v4-flash
+    thinking: disabled
+    temperature: 0
+    max_tokens: 5000
+  subagent_worker:
+    model: deepseek-v4-flash
+    thinking: disabled
+    temperature: 0
+    max_tokens: 1200
