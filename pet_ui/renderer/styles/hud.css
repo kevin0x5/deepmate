@@ -40,12 +40,32 @@ h1 {
 
 p {
   margin: 0;
-  min-height: 32px;
-  max-height: 42px;
+  min-height: 36px;
+  max-height: 58px;
   overflow: hidden;
   color: #40545e;
   font-size: 13px;
   line-height: 1.45;
+}
+
+p strong,
+.timeline b strong {
+  color: #17242a;
+  font-weight: 800;
+}
+
+p code,
+.timeline b code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  color: #24404a;
+  background: rgba(31, 64, 74, 0.08);
+  font: 600 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.hud-link {
+  color: #1f6f8b;
+  font-weight: 700;
 }
 
 .facts {

@@ -293,7 +293,7 @@ class PetBackendService:
                 "shown_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             }
             self.store.save_learning_state(state)
-            text = bounded_pet_text(f"学习建议：{suggestion.summary} {suggestion.url}", 180)
+            text = bounded_pet_text(f"可以看看：{suggestion.summary} {suggestion.url}", 180)
             self._learning_failure_count = 0
             bubble = {
                 "text": text,

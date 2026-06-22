@@ -22,7 +22,7 @@ function statusLabel(state) {
 window.deepmatePet.onHud((state) => {
   kind.textContent = statusLabel(state);
   title.textContent = String((state && state.title) || 'Current work');
-  summary.textContent = String((state && state.summary) || 'Deepmate is ready.');
+  renderInlineMarkdown(summary, String((state && state.summary) || 'Deepmate is ready.'));
   project.textContent = projectName(state);
   status.textContent = statusText(state);
   renderTimeline(state);
@@ -54,7 +54,7 @@ function renderTimeline(state) {
     const label = document.createElement('span');
     const body = document.createElement('b');
     label.textContent = item.label;
-    body.textContent = item.body;
+    renderInlineMarkdown(body, item.body);
     row.append(label, body);
     timeline.append(row);
   });
@@ -66,10 +66,6 @@ function timelineItems(state) {
   if (kindText) {
     items.push({ label: 'Now', body: kindText });
   }
-  const summaryText = String((state && state.summary) || '').trim();
-  if (summaryText) {
-    items.push({ label: 'Latest', body: summaryText });
-  }
   const refs = Array.isArray(state && state.refs) ? state.refs : [];
   const ref = refs.find((item) => String(item || '').trim());
   if (ref) {
@@ -79,6 +75,35 @@ function timelineItems(state) {
     items.push({ label: 'Now', body: 'Deepmate is ready.' });
   }
   return items.slice(0, 3);
+}
+
+function renderInlineMarkdown(root, text) {
+  root.replaceChildren();
+  let index = 0;
+  const pattern = /(\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/g;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > index) {
+      root.append(document.createTextNode(text.slice(index, match.index)));
+    }
+    if (match[2]) {
+      const strong = document.createElement('strong');
+      strong.textContent = match[2];
+      root.append(strong);
+    } else if (match[3]) {
+      const code = document.createElement('code');
+      code.textContent = match[3];
+      root.append(code);
+    } else if (match[4]) {
+      const span = document.createElement('span');
+      span.className = 'hud-link';
+      span.textContent = match[4];
+      root.append(span);
+    }
+    index = match.index + match[0].length;
+  }
+  if (index < text.length) {
+    root.append(document.createTextNode(text.slice(index)));
+  }
 }
 
 function shouldShowFeedback(state) {

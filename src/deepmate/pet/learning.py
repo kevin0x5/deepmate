@@ -152,7 +152,8 @@ def _learning_request(
         content=(
             "You choose one useful external item for a desktop pet learning card. "
             "Return one concise zh-CN explanation, max 120 Chinese characters. "
-            "Do not quote long copyrighted text. Do not mention private memory."
+            "Write naturally. Do not introduce the pet, mention implementation details, "
+            "quote long copyrighted text, or mention private memory."
         ),
     )
     body = {
@@ -185,7 +186,7 @@ def _fallback_suggestion(
     interest_tags: Iterable[str],
 ) -> LearningSuggestion:
     tags = ", ".join(tag for tag in interest_tags if tag)
-    reason = f"Related to {tags}." if tags else "May be related to current work."
+    reason = f"和 {tags} 相关。" if tags else "可能和当前工作相关。"
     summary = candidate.summary.strip() or candidate.title.strip()
     return LearningSuggestion(
         title=candidate.title.strip(),

@@ -22,24 +22,24 @@ body {
 
 .sprite {
   position: absolute;
-  left: 18px;
-  top: 24px;
+  left: 15px;
+  top: 20px;
   width: 154px;
   height: 132px;
   image-rendering: pixelated;
-  filter: drop-shadow(0 7px 0 rgba(11, 18, 23, 0.14));
+  filter: drop-shadow(0 9px 0 rgba(11, 18, 23, 0.11)) drop-shadow(0 12px 18px rgba(11, 18, 23, 0.12));
   animation: idle-bob 2.4s steps(2) infinite;
   transform-origin: 50% 80%;
 }
 
 .shadow {
   position: absolute;
-  left: 53px;
-  bottom: 24px;
-  width: 84px;
-  height: 17px;
+  left: 47px;
+  bottom: 21px;
+  width: 96px;
+  height: 18px;
   border-radius: 50%;
-  background: rgba(21, 28, 33, 0.22);
+  background: rgba(21, 28, 33, 0.16);
 }
 
 .status-layer,

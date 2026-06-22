@@ -160,6 +160,10 @@ class PetCompanionTests(unittest.TestCase):
             idle = pet.frames["idle"][0]
             self.assertGreaterEqual(len(idle), 14)
             self.assertGreaterEqual(len(idle[0]), 18)
+            for frames in pet.frames.values():
+                for frame in frames:
+                    self.assertEqual(len(frame), 16)
+                    self.assertEqual({len(row) for row in frame}, {20})
 
     def test_pet_service_publishes_frontend_ui_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -252,6 +256,8 @@ class PetCompanionTests(unittest.TestCase):
         hud_js = (root / "pet_ui/renderer/hud.js").read_text(encoding="utf-8")
         hud_css = (root / "pet_ui/renderer/styles/hud.css").read_text(encoding="utf-8")
         pet_css = (root / "pet_ui/renderer/styles/pet.css").read_text(encoding="utf-8")
+        bubble_js = (root / "pet_ui/renderer/bubble.js").read_text(encoding="utf-8")
+        bubble_css = (root / "pet_ui/renderer/styles/bubble.css").read_text(encoding="utf-8")
 
         self.assertIn("frame: false", main_js)
         self.assertIn("transparent: true", main_js)
@@ -296,6 +302,9 @@ class PetCompanionTests(unittest.TestCase):
         self.assertIn("profile,", main_js)
         self.assertIn("REACTIONS", pet_js)
         self.assertIn("cleanReaction", pet_js)
+        self.assertIn("renderInlineMarkdown", bubble_js)
+        self.assertIn("document.createElement('strong')", bubble_js)
+        self.assertIn("max-height: 130px", bubble_css)
         self.assertIn("setTimedMuteHours(1)", main_js)
         self.assertIn("Quiet 1h", main_js)
         self.assertIn("Quiet 1h", hud_js)
@@ -388,7 +397,7 @@ class PetCompanionTests(unittest.TestCase):
         self.assertIn("path=task/achievements/stage.md", event.refs)
         self.assertTrue(decision.show_bubble)
         self.assertTrue(decision.hold)
-        self.assertIn("Milestone stored", text)
+        self.assertIn("这个阶段记下来了", text)
 
     def test_care_reminder_event_gets_low_priority_pet_bubble(self) -> None:
         event = event_for_care_reminder(summary="Take a short break.")

@@ -48,34 +48,34 @@ def fallback_pet_copy(
     if event.kind == "task.achievement":
         text = _by_style(
             style,
-            dog=f"Stage saved. {summary}",
-            cat=f"Stage saved. {summary}",
-            squirrel=f"Milestone stored: {summary}",
-            penguin=f"I saved the stage result. {summary}",
+            dog=f"已保存阶段成果：{summary}",
+            cat=f"阶段成果收好啦：{summary}",
+            squirrel=f"这个阶段记下来了：{summary}",
+            penguin=f"阶段成果已归档：{summary}",
         )
     elif event.kind == "task.completed":
         text = _by_style(
             style,
-            dog=f"Done. {summary}",
-            cat=f"Done. {summary}",
-            squirrel=f"Done. Found the result: {summary}",
-            penguin=f"I think it is done. {summary}",
+            dog=f"完成啦：{summary}",
+            cat=f"处理好了：{summary}",
+            squirrel=f"搞定：{summary}",
+            penguin=f"已经完成：{summary}",
         )
     elif event.kind in {"task.failed", "task.waiting"}:
         text = _by_style(
             style,
-            dog=f"This needs a look. {summary}",
-            cat=f"Something needs attention. {summary}",
-            squirrel=f"This path is blocked. {summary}",
-            penguin=f"I ran into a problem. {summary}",
+            dog=f"这里需要你看一下：{summary}",
+            cat=f"有个地方需要确认：{summary}",
+            squirrel=f"这一步先卡住了：{summary}",
+            penguin=f"遇到一个问题：{summary}",
         )
     elif event.kind.startswith("learning."):
         text = _by_style(
             style,
-            dog=f"I found something that may help: {summary}",
-            cat=f"Found something mildly relevant: {summary}",
-            squirrel=f"I spotted a useful link: {summary}",
-            penguin=f"This may be related: {summary}",
+            dog=f"这条可能有用：{summary}",
+            cat=f"看到一条相关内容：{summary}",
+            squirrel=f"顺手标了一条资料：{summary}",
+            penguin=f"这条可以参考：{summary}",
         )
     elif event.kind.startswith("care."):
         text = _by_style(
@@ -88,10 +88,10 @@ def fallback_pet_copy(
     else:
         text = _by_style(
             style,
-            dog=f"I am on it. {summary}",
-            cat=f"Still working. {summary}",
-            squirrel=f"Progress update: {summary}",
-            penguin=f"I am still working. {summary}",
+            dog=f"正在处理：{summary}",
+            cat=f"还在看：{summary}",
+            squirrel=f"进度更新：{summary}",
+            penguin=f"还在处理中：{summary}",
         )
     return bounded_pet_text(text, max_chars)
 
@@ -107,7 +107,8 @@ def _copy_request(
         content=(
             "You write one short desktop pet bubble for Deepmate. "
             "Use zh-CN if the input is Chinese, otherwise match the input language. "
-            "Do not mention session ids, token counts, hidden context, or screen reading. "
+            "Write naturally and warmly. Do not introduce the pet, its implementation, "
+            "frameworks, session ids, token counts, hidden context, or screen reading. "
             f"Return at most {max_chars} characters."
         ),
     )
