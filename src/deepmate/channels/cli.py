@@ -2324,19 +2324,27 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="deepmate",
         description=(
-            "Deepmate local agent. Common: deepmate --interactive "
-            "--workspace-write --shell"
+            "Deepmate local agent. Run `deepmate` to open the TUI, or "
+            "`deepmate --cli 'prompt'` for a one-shot CLI turn."
         ),
         epilog=(
-            "Typical use: deepmate --interactive, deepmate --workspace-write "
+            "Typical use: deepmate, deepmate --cli --workspace-write "
             "'edit README', or deepmate --show-session <id>."
         ),
     )
     parser.add_argument("prompt", nargs="*", help="User prompt for one Deepmate turn.")
     parser.add_argument(
+        "--cli",
+        action="store_true",
+        help=(
+            "Run a one-shot command-line turn instead of opening the TUI. "
+            "For compatibility, providing a prompt without --cli also runs one turn."
+        ),
+    )
+    parser.add_argument(
         "--interactive",
         action="store_true",
-        help="Start the Textual TUI for a durable session.",
+        help="Start the Textual TUI for a durable session. This is the default with no prompt.",
     )
     parser.add_argument(
         "--interactive-legacy",
@@ -2930,6 +2938,7 @@ def _group_parser_help(parser: argparse.ArgumentParser) -> None:
     option_groups = {
         "Core": {
             "--interactive",
+            "--cli",
             "--interactive-legacy",
             "--validate-runtime",
             "--doctor",

@@ -244,11 +244,18 @@ class RuntimeValidationTests(unittest.TestCase):
         self.assertIn("Tool Access:", help_text)
         self.assertIn("Sessions And Recovery:", help_text)
         self.assertIn("Remote:", help_text)
+        self.assertIn("--cli", help_text)
         self.assertIn("--interactive", help_text)
         self.assertIn("--setup-key", help_text)
         self.assertIn("--setup-wecom", help_text)
         self.assertIn("--workspace-write", help_text)
         self.assertIn("--rewind", help_text)
+
+    def test_cli_flag_parses_as_explicit_one_shot_mode(self) -> None:
+        args = _build_parser().parse_args(("--cli", "summarize", "this"))
+
+        self.assertTrue(args.cli)
+        self.assertEqual(args.prompt, ["summarize", "this"])
 
     def test_setup_key_saves_provider_key_to_local_private_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
