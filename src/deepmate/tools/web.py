@@ -51,7 +51,8 @@ def web_research_tools(*, network_enabled: bool) -> tuple[NativeTool, ...]:
 
 
 def _web_search(arguments: Mapping[str, object]) -> NativeToolResult:
-    query = _text(arguments, "query")
+    original_query = _text(arguments, "query")
+    query = _search_query(original_query)
     max_results = _int(
         arguments,
         "max_results",
@@ -112,6 +113,7 @@ def _web_search(arguments: Mapping[str, object]) -> NativeToolResult:
         content=content or parse_warning or "No search results found.",
         data={
             "query": query,
+            "original_query": original_query,
             "result_count": len(results),
             "backend": backend,
             "search_url": final_url,
@@ -638,6 +640,14 @@ def _int(
     if value < minimum or value > maximum:
         raise ValueError(f"{key} must be between {minimum} and {maximum}")
     return value
+
+
+def _search_query(query: str) -> str:
+    parsed = urlparse(query)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        host = parsed.netloc.lower().removeprefix("www.")
+        return f"site:{host} {host}"
+    return query
 
 
 def _web_search_schema() -> Mapping[str, object]:

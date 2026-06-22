@@ -59,6 +59,10 @@ def next_run_at(schedule: CronSchedule, *, now: datetime | None = None) -> str:
         if candidate <= current:
             candidate = candidate + timedelta(days=7)
         return candidate.isoformat()
+    if kind == "weekdays":
+        while candidate <= current or candidate.weekday() >= 5:
+            candidate = candidate + timedelta(days=1)
+        return candidate.isoformat()
     if candidate <= current:
         candidate = candidate + timedelta(days=1)
     return candidate.isoformat()

@@ -413,6 +413,8 @@ def _denied(
 def _hard_deny_command_reason(command: str) -> str:
     normalized = _normalized_command(command)
     shell_text = _shell_match_command(command)
+    if _references_sensitive_workspace_path(shell_text):
+        return "Shell command references a sensitive workspace path, which Deepmate will not run."
     if re.search(r"(^|[;&|`]\s*|\(\s*)sudo(\s|$)", shell_text):
         return "Shell command uses sudo, which Deepmate will not run."
     if re.search(r"(^|[;&|`]\s*|\(\s*)su(\s|$)", shell_text):
@@ -457,9 +459,11 @@ def _command_risk(command: str, network_mode: str) -> SafetyRiskLevel:
         return SafetyRiskLevel.HIGH
     if re.match(
         r"^(python3? -m unittest|python3? -m pytest|pytest|npm test|npm run test|"
-        r"pnpm test|yarn test|git status|git diff|git log|git show|rg|ls|pwd)\b",
+        r"pnpm test|yarn test|git status|git diff|git log|git show|ls|pwd)\b",
         normalized,
     ):
+        if normalized.startswith("ls") and _ls_can_show_hidden_paths(normalized):
+            return SafetyRiskLevel.MEDIUM
         return SafetyRiskLevel.LOW
     if _is_env_change_command(normalized):
         return SafetyRiskLevel.HIGH
@@ -492,6 +496,14 @@ def _approval_reason(risk: SafetyRiskLevel, network_mode: str) -> str:
     if risk == SafetyRiskLevel.HIGH:
         return "Shell command may modify the environment and requires approval."
     return "Shell command is outside the low-risk validation set and requires approval."
+
+
+def _ls_can_show_hidden_paths(command: str) -> bool:
+    return bool(
+        re.search(r"(^|\s)-[a-z]*a[a-z]*($|\s)", command)
+        or re.search(r"(^|\s)--all($|\s)", command)
+        or re.search(r"(^|\s)--almost-all($|\s)", command)
+    )
 
 
 def _command_prefix(command: str) -> str:
@@ -535,6 +547,44 @@ def _uses_dynamic_command_position(shell_text: str) -> bool:
             shell_text,
         )
     )
+
+
+def _references_sensitive_workspace_path(shell_text: str) -> bool:
+    sensitive_segments = (
+        ".aws",
+        ".env",
+        ".git",
+        ".hg",
+        ".ssh",
+        ".svn",
+        ".npmrc",
+        ".pypirc",
+        "var",
+    )
+    suffixes = (".pem", ".key", ".p12", ".pfx")
+    if re.search(r"(^|[/'\"\s(])\.env(?:\.|[/\"'\s)]|$)", shell_text):
+        return True
+    if re.search(r"(^|[/'\"\s(])\.(?:aws|git|hg|ssh|svn)(?:[/\"'\s)]|$)", shell_text):
+        return True
+    if re.search(r"(^|[/'\"\s(])\.(?:npmrc|pypirc)(?:[/\"'\s)]|$)", shell_text):
+        return True
+    if re.search(r"(^|[/'\"\s(])var(?:[/\"'\s)]|$)", shell_text):
+        return True
+    if re.search(r"\.(?:pem|key|p12|pfx)(?:[/\"'\s)]|$)", shell_text):
+        return True
+    tokens = re.findall(r"""(?:"[^"]*"|'[^']*'|[^\s;&|()<>]+)""", shell_text)
+    quoted_values = re.findall(r"""["']([^"']+)["']""", shell_text)
+    candidates = (*tokens, *quoted_values)
+    for token in candidates:
+        clean = token.strip("\"'")
+        if not clean or clean.startswith("-"):
+            continue
+        parts = tuple(part for part in re.split(r"/+", clean) if part and part != ".")
+        if any(part in sensitive_segments or part.startswith(".env.") for part in parts):
+            return True
+        if clean.endswith(suffixes):
+            return True
+    return False
 
 
 def _hard_deny_alias_reason(shell_text: str) -> str:

@@ -170,6 +170,7 @@ class OllamaLocalRuntime:
         *,
         progress: ProgressCallback | None = None,
         state_store: LocalModelStateStore | None = None,
+        install_missing_runtime: bool = True,
     ) -> LocalModelInstallResult:
         """Ensure Ollama is running and the requested model is available."""
         _emit_progress(
@@ -180,6 +181,16 @@ class OllamaLocalRuntime:
             state_store=state_store,
         )
         status = self.ensure_ready()
+        if not status.installed and not install_missing_runtime:
+            result = LocalModelInstallResult(
+                ok=False,
+                preset=preset,
+                message=(
+                    "需要先安装本地模型运行组件 Ollama：https://ollama.com/download"
+                ),
+            )
+            _record_result(state_store, result)
+            return result
         if not status.installed:
             _record_state(
                 state_store,

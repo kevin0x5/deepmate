@@ -346,6 +346,7 @@ class PreviewDeployTests(unittest.TestCase):
                     data_dir=data_dir,
                     tunnel_provider=provider,
                 )
+                running_state = PreviewDeployStore.in_data_dir(data_dir).load()
                 stopped = handle_deploy_command(
                     "/deploy stop",
                     workspace=workspace,
@@ -412,18 +413,33 @@ class PreviewDeployTests(unittest.TestCase):
                     data_dir=data_dir,
                     tunnel_provider=provider,
                 )
+                running_state = PreviewDeployStore.in_data_dir(data_dir).load()
+                stopped = handle_deploy_command(
+                    "/deploy stop",
+                    workspace=workspace,
+                    data_dir=data_dir,
+                    tunnel_provider=provider,
+                )
+                status_after_stop = handle_deploy_command(
+                    "/deploy status",
+                    workspace=workspace,
+                    data_dir=data_dir,
+                    tunnel_provider=provider,
+                )
 
-            state = PreviewDeployStore.in_data_dir(data_dir).load()
-            self.assertIsNotNone(state)
-            assert state is not None
-            self.assertEqual(state.status, "running")
-            self.assertEqual(state.provider, "local")
-            self.assertFalse(state.public_url)
+            self.assertIsNotNone(running_state)
+            assert running_state is not None
+            self.assertEqual(running_state.status, "running")
+            self.assertEqual(running_state.provider, "local")
+            self.assertFalse(running_state.public_url)
             self.assertIn("本地临时预览已开启", created)
             self.assertIn("公开分享链接暂不可用", created)
             self.assertIn("本地调试地址: http://127.0.0.1:", created)
             self.assertIn("本地临时预览运行中", status)
             self.assertIn("外部链接: 暂不可用", status)
+            self.assertIn("临时预览已关闭", stopped)
+            self.assertIn("临时预览已关闭", status_after_stop)
+            self.assertNotIn("本地预览已继续运行", status_after_stop)
 
     def test_exited_supervisor_is_marked_stale_and_process_ref_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -241,6 +241,16 @@ class BuiltinWorkspaceToolTests(unittest.TestCase):
             (workspace / "README.md").write_text("Deepmate project", encoding="utf-8")
             (workspace / "src").mkdir()
             (workspace / "src" / "app.py").write_text("print('ok')", encoding="utf-8")
+            (workspace / "config").mkdir()
+            (workspace / "config" / "deepmate.yaml").write_text(
+                "runtime: internal\n",
+                encoding="utf-8",
+            )
+            (workspace / "profiles").mkdir()
+            (workspace / "profiles" / "memory.md").write_text(
+                "internal memory",
+                encoding="utf-8",
+            )
             (workspace / ".env").write_text("SECRET=1", encoding="utf-8")
             (workspace / ".env.staging").write_text("SECRET=2", encoding="utf-8")
             registry = NativeToolRegistry(workspace_search_tools(workspace))
@@ -271,8 +281,47 @@ class BuiltinWorkspaceToolTests(unittest.TestCase):
                 self.assertIsNotNone(result.model_result)
                 self.assertIn("README.md", result.model_result.content)
                 self.assertIn("src/app.py", result.model_result.content)
+                self.assertNotIn("config/deepmate.yaml", result.model_result.content)
+                self.assertNotIn("profiles/memory.md", result.model_result.content)
                 self.assertNotIn(".env", result.model_result.content)
                 self.assertNotIn(".env.staging", result.model_result.content)
+
+    def test_filesystem_directory_listing_hides_deepmate_internal_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "README.md").write_text("Project", encoding="utf-8")
+            (workspace / "config").mkdir()
+            (workspace / "config" / "deepmate.yaml").write_text(
+                "runtime: internal\n",
+                encoding="utf-8",
+            )
+            (workspace / "profiles").mkdir()
+            (workspace / "profiles" / "memory.md").write_text(
+                "internal memory",
+                encoding="utf-8",
+            )
+            registry = NativeToolRegistry(workspace_filesystem_tools(workspace))
+
+            listing = execute_native_tool_request(
+                ModelToolRequest(name="list_directory", id="call_1", arguments={}),
+                registry,
+            )
+            explicit_read = execute_native_tool_request(
+                ModelToolRequest(
+                    name="read_text_file",
+                    id="call_2",
+                    arguments={"path": "config/deepmate.yaml"},
+                ),
+                registry,
+            )
+
+            self.assertIsNone(listing.error)
+            self.assertIsNotNone(listing.model_result)
+            self.assertIn("README.md", listing.model_result.content)
+            self.assertNotIn("config/", listing.model_result.content)
+            self.assertNotIn("profiles/", listing.model_result.content)
+            self.assertIsNone(explicit_read.error)
+            self.assertIn("runtime: internal", explicit_read.model_result.content)
 
     def test_filesystem_write_denies_env_glob_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1648,6 +1697,38 @@ class WebResearchToolTests(unittest.TestCase):
         self.assertIsNotNone(result.model_result)
         self.assertIn("https://example.com/one", result.model_result.content)
         self.assertEqual(result.model_result.data["backend"], "duckduckgo_html")
+
+    def test_web_search_normalizes_url_like_query(self) -> None:
+        registry = NativeToolRegistry(web_research_tools(network_enabled=True))
+        html = b"""
+        <a class="result__a" href="/l/?uddg=https%3A%2F%2Fopenai.com%2F">OpenAI</a>
+        <div class="result__snippet">Homepage.</div>
+        """
+        response = _FakeResponse(html, "https://html.duckduckgo.com/html/?q=x", "text/html")
+        seen_urls = []
+
+        def fake_open(request):
+            seen_urls.append(request.full_url)
+            return response
+
+        with patch(
+            "deepmate.tools.url_safety.socket.getaddrinfo",
+            return_value=[_addr("198.51.100.232")],
+        ):
+            with patch("deepmate.tools.web._open_public_request", side_effect=fake_open):
+                result = execute_native_tool_request(
+                    ModelToolRequest(
+                        name="web_search",
+                        id="call_1",
+                        arguments={"query": "https://www.openai.com/", "max_results": 1},
+                    ),
+                    registry,
+                )
+
+        self.assertIsNone(result.error)
+        self.assertIn("q=site%3Aopenai.com+openai.com", seen_urls[0])
+        self.assertEqual(result.model_result.data["query"], "site:openai.com openai.com")
+        self.assertEqual(result.model_result.data["original_query"], "https://www.openai.com/")
 
     def test_web_search_falls_back_when_duckduckgo_classes_change(self) -> None:
         registry = NativeToolRegistry(web_research_tools(network_enabled=True))

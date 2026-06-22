@@ -23,6 +23,7 @@ from deepmate.cron.model import (
 )
 from deepmate.cron.planner import preflight_job
 from deepmate.cron.runner import run_due_jobs, run_job_now, watch_due_jobs
+from deepmate.cron.schedule import next_run_at
 from deepmate.cron.store import CronJobStore
 from deepmate.domain import ProfileRef
 from deepmate.runtime import (
@@ -83,6 +84,28 @@ class CronJobTests(unittest.TestCase):
             self.assertEqual(job.schedule.weekday, "monday")
             self.assertEqual(job.schedule.time, "21:00")
             self.assertEqual(job.output.path, "reports/weekly")
+
+    def test_cron_add_parses_weekday_readme_example(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+
+            message = handle_cron_command(
+                "/cron add Every weekday at 09:00, summarize project status into reports/daily",
+                workspace=workspace,
+            )
+
+            job = CronJobStore(workspace).load()[0]
+            self.assertEqual(job.schedule.kind, "weekdays")
+            self.assertEqual(job.schedule.time, "09:00")
+            self.assertIn("每个工作日 09:00", message)
+
+    def test_weekday_schedule_skips_weekend(self) -> None:
+        next_run = next_run_at(
+            CronSchedule(kind="weekdays", time="09:00", timezone="UTC"),
+            now=datetime.fromisoformat("2026-06-19T10:00:00+00:00"),
+        )
+
+        self.assertEqual(next_run, "2026-06-22T09:00:00+00:00")
 
     def test_cron_add_parses_hour_interval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

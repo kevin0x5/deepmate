@@ -125,7 +125,7 @@ def preflight_job(job: CronJob, *, workspace: str | Path) -> None:
     schedule_kind = job.schedule.kind.strip().lower()
     if schedule_kind == "once":
         raise ValueError("cron jobs are recurring; use a normal prompt for one-time work")
-    if schedule_kind not in {"daily", "weekly", "interval"}:
+    if schedule_kind not in {"daily", "weekly", "weekdays", "interval"}:
         raise ValueError(f"unsupported cron schedule kind: {job.schedule.kind}")
     next_run_at(job.schedule)
     if not job.job.prompt.strip():
@@ -195,6 +195,12 @@ def _infer_schedule(text: str) -> CronSchedule:
         return CronSchedule(
             kind="interval",
             interval_minutes=max(1, int(hour_interval.group(1)) * 60),
+            timezone=tz_name,
+        )
+    if any(marker in lower for marker in ("weekday", "weekdays", "workday", "workdays", "工作日")):
+        return CronSchedule(
+            kind="weekdays",
+            time=_time_from_text(text),
             timezone=tz_name,
         )
     weekday = _weekday_from_text(text)

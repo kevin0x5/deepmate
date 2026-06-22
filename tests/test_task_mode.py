@@ -768,6 +768,27 @@ class TaskModeTests(unittest.TestCase):
             self.assertFalse((workspace / ".deepmate" / "task_mode.json").exists())
             self.assertTrue((workspace / "task" / "plan.md").exists())
 
+    def test_cli_task_status_does_not_create_task_documents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = _workspace(Path(tmp))
+            _write_cli_config(workspace)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(
+                    (
+                        "--workspace",
+                        str(workspace),
+                        "--task",
+                        "status",
+                    )
+                )
+
+            self.assertEqual(exit_code, 0, stderr.getvalue())
+            self.assertIn("stage: inactive", stdout.getvalue())
+            self.assertFalse((workspace / "task").exists())
+
     def test_interactive_task_command_persists_across_followup_turns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = _workspace(Path(tmp))

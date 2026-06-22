@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -86,6 +87,26 @@ class ShellSafetyTests(unittest.TestCase):
         self.assertIsNone(result.error)
         self.assertIn(tmp, result.model_result.content)
         self.assertIn("shell_backend=off", result.model_result.refs)
+
+    def test_rg_and_hidden_ls_are_not_low_risk_shell_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = ToolSafetyPolicy(
+                workspace=Path(tmp),
+                shell_enabled=True,
+                network_enabled=False,
+            )
+
+            rg_search = policy.check_shell_command("rg SECRET .")
+            hidden_listing = policy.check_shell_command("ls -la")
+            ordinary_listing = policy.check_shell_command("ls src")
+
+        self.assertFalse(rg_search.allowed)
+        self.assertTrue(rg_search.requires_approval)
+        self.assertIn("outside the low-risk", rg_search.reason)
+        self.assertFalse(hidden_listing.allowed)
+        self.assertTrue(hidden_listing.requires_approval)
+        self.assertIn("outside the low-risk", hidden_listing.reason)
+        self.assertTrue(ordinary_listing.allowed)
 
     def test_medium_shell_command_requires_approval_with_shell_access(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -249,6 +270,35 @@ class ShellSafetyTests(unittest.TestCase):
 
         self.assertFalse(decision.allowed)
         self.assertIn("shell profile", decision.reason)
+
+    def test_hard_deny_blocks_sensitive_workspace_path_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = ToolSafetyPolicy(
+                workspace=Path(tmp),
+                shell_enabled=True,
+                network_enabled=False,
+            )
+
+            env_file = policy.check_shell_command("cat .env")
+            env_variant = policy.check_shell_command("cat config/.env.local")
+            private_key = policy.check_shell_command("cat certs/service.pem")
+            python_read = policy.check_shell_command(
+                "python3 -c 'print(open(\".env\").read())'"
+            )
+            wrapped_read = policy.check_shell_command("sh -c 'cat .env'")
+            ordinary = policy.check_shell_command("pwd")
+
+        self.assertFalse(env_file.allowed)
+        self.assertIn("sensitive workspace path", env_file.reason)
+        self.assertFalse(env_variant.allowed)
+        self.assertIn("sensitive workspace path", env_variant.reason)
+        self.assertFalse(private_key.allowed)
+        self.assertIn("sensitive workspace path", private_key.reason)
+        self.assertFalse(python_read.allowed)
+        self.assertIn("sensitive workspace path", python_read.reason)
+        self.assertFalse(wrapped_read.allowed)
+        self.assertIn("sensitive workspace path", wrapped_read.reason)
+        self.assertTrue(ordinary.allowed)
 
     def test_safe_environment_removes_secret_connection_values(self) -> None:
         env = safe_environment(
@@ -596,12 +646,31 @@ class ShellSafetyTests(unittest.TestCase):
                     cwd=workspace,
                     mode=SandboxMode.AUTO,
                 )
-            )
+        )
 
         self.assertIn("(deny network*)", profile)
-        self.assertIn(str(workspace / ".env"), profile)
+        self.assertIn("\\.env", profile)
         self.assertIn(str(workspace / ".ssh"), profile)
-        self.assertIn(str(workspace / ".git"), profile)
+        self.assertIn("\\.git", profile)
+
+    @unittest.skipUnless(shutil.which("sandbox-exec"), "sandbox-exec not available")
+    def test_sandbox_exec_runs_low_risk_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            runner = SandboxRunner()
+
+            pwd_result = runner.run(
+                "pwd",
+                SandboxPolicy(
+                    workspace=workspace,
+                    cwd=workspace,
+                    mode=SandboxMode.AUTO,
+                ),
+            )
+
+        self.assertEqual(pwd_result.backend, "sandbox-exec")
+        self.assertEqual(pwd_result.exit_code, 0)
+        self.assertIn(str(workspace.resolve()), pwd_result.stdout)
 
     def test_seatbelt_profile_limits_read_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

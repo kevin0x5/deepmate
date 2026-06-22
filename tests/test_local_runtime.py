@@ -106,6 +106,29 @@ class LocalRuntimeTests(unittest.TestCase):
         self.assertIn("Ollama", result.message)
         self.assertIn("https://ollama.com/download", result.message)
 
+    def test_prepare_model_can_skip_runtime_install(self) -> None:
+        preset = local_model_by_id("qwen3-local")
+        self.assertIsNotNone(preset)
+        runtime = OllamaLocalRuntime()
+
+        with (
+            patch.object(
+                runtime,
+                "ensure_ready",
+                return_value=LocalModelStatus(
+                    available=False,
+                    installed=False,
+                    running=False,
+                ),
+            ),
+            patch.object(runtime, "install_runtime") as install_runtime,
+        ):
+            result = runtime.prepare_model(preset, install_missing_runtime=False)
+
+        self.assertFalse(result.ok)
+        self.assertIn("Ollama", result.message)
+        install_runtime.assert_not_called()
+
     def test_prepare_model_installs_ollama_with_homebrew_when_available(self) -> None:
         preset = local_model_by_id("qwen3-local")
         self.assertIsNotNone(preset)

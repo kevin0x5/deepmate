@@ -1013,6 +1013,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     provider=provider,
                     model=qa_model,
                     options=options,
+                    allow_fallback=True,
                 )
             )
         except (OSError, ValueError, json.JSONDecodeError, ProviderError) as exc:
@@ -1027,6 +1028,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 provider=provider,
                 model=qa_model,
                 options=options,
+                allow_fallback=True,
             )
         except (OSError, ValueError, json.JSONDecodeError, ProviderError) as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -3620,6 +3622,7 @@ def _handle_qa_cli(
     provider,
     model: str,
     options: Mapping[str, object],
+    allow_fallback: bool = False,
 ) -> str:
     parts = tuple(value for value in (values or ()) if str(value).strip())
     if not parts:
@@ -3630,6 +3633,7 @@ def _handle_qa_cli(
         provider=provider,
         model=model,
         options=options,
+        allow_fallback=allow_fallback,
     )
 
 
@@ -3675,6 +3679,7 @@ def _prepare_local_model_command(settings: AppSettings, args: argparse.Namespace
         preset,
         progress=progress_sink,
         state_store=LocalModelStateStore(settings.data_dir),
+        install_missing_runtime=False,
     )
 
 
@@ -4696,10 +4701,7 @@ def _print_session_detail(
     print(f"  updated_at: {session.updated_at}")
     print(f"  transcript: {session.transcript_path}")
     if activity_store is not None:
-        print(
-            "  activity_note: "
-            f"{_workspace_relative(activity_store.daily_path(session.updated_at[:10]), session.workspace)}"
-        )
+        print(f"  activity_note: {_session_activity_note_path(session, activity_store, trace_records)}")
     if summary_record is not None:
         print(f"  summary: {session_store.summary_path(session.session_id)}")
         print(f"  summary_id: {summary_record.summary_id}")
@@ -4831,6 +4833,21 @@ def _read_session_trace_records(
             ) and trace_record_matches_kinds(record, trace_kinds):
                 records.append(record)
     return tuple(records)
+
+
+def _session_activity_note_path(
+    session: SessionRecord,
+    activity_store: ActivityStore,
+    trace_records: Sequence[Mapping[str, object]],
+) -> str:
+    for record in reversed(trace_records):
+        if str(record.get("kind", "")).strip() != "activity_daily_note_written":
+            continue
+        refs = trace_refs_to_map(trace_record_refs(record))
+        path = str(refs.get("activity_path", "")).strip()
+        if path:
+            return path
+    return _workspace_relative(activity_store.daily_path(session.updated_at[:10]), session.workspace)
 
 
 def _format_trace_record(record: Mapping[str, object]) -> str:

@@ -702,6 +702,12 @@ class TuiChannelTests(unittest.TestCase):
             workspace = Path(tmp)
             (workspace / "src").mkdir()
             (workspace / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            (workspace / "config").mkdir()
+            (workspace / "config" / "deepmate.yaml").write_text("{}", encoding="utf-8")
+            (workspace / "profiles").mkdir()
+            (workspace / "profiles" / "memory.md").write_text("", encoding="utf-8")
+            (workspace / "task").mkdir()
+            (workspace / "task" / "plan.md").write_text("# plan", encoding="utf-8")
             (workspace / "var").mkdir()
             (workspace / "var" / "trace.jsonl").write_text("{}", encoding="utf-8")
 

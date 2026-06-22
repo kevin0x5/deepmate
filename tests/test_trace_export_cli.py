@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from deepmate.app import AppSettings, ProviderSettings
+from deepmate.activity import ActivityStore
 from deepmate.channels.cli import _print_session_detail, _validate_otlp_export
 from deepmate.domain import ProfileRef
 from deepmate.storage import SessionStore
@@ -98,6 +99,53 @@ class TraceExportCliTests(unittest.TestCase):
         self.assertEqual(captured["spans"][0].attributes["session.id"], session.session_id)
         self.assertEqual(captured["kwargs"]["endpoint"], "https://otel.example")
         self.assertIn("OTLP export completed", stdout.getvalue())
+
+    def test_show_session_uses_recorded_activity_note_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SessionStore.in_directory(root / "var" / "sessions")
+            session = store.create(
+                workspace=root,
+                profile=ProfileRef(name="default", uri="profiles/default"),
+                title="Activity path",
+            )
+            trace_path = root / "var" / "traces" / "trace.jsonl"
+            recorder = TraceRecorder(JsonlTraceSink(trace_path))
+            recorder.record(
+                TraceEvent(
+                    kind="activity_daily_note_written",
+                    summary="Activity note written.",
+                    refs=(
+                        f"session_id={session.session_id}",
+                        "activity_date=2026-06-22",
+                        "activity_path=var/activity/default/daily/2026-06-22.md",
+                    ),
+                )
+            )
+            settings = AppSettings(
+                workspace=root,
+                data_dir=root / "var",
+                active_profile="default",
+                trace_sink=trace_path,
+                default_provider="deepseek",
+            )
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                _print_session_detail(
+                    session_store=store,
+                    session=session,
+                    data_dir=root / "var",
+                    trace_path=trace_path,
+                    activity_store=ActivityStore(root / "var" / "activity" / "default"),
+                    trace_limit=0,
+                    settings=settings,
+                )
+
+        self.assertIn(
+            "activity_note: var/activity/default/daily/2026-06-22.md",
+            stdout.getvalue(),
+        )
 
     def test_validate_otlp_exports_synthetic_deepmate_trace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

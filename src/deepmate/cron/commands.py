@@ -228,6 +228,8 @@ def _schedule_text(job: CronJob) -> str:
     schedule = job.schedule
     if schedule.kind == "weekly":
         return f"每周 {schedule.weekday or '-'} {schedule.time or '09:00'}"
+    if schedule.kind == "weekdays":
+        return f"每个工作日 {schedule.time or '09:00'}"
     if schedule.kind == "interval":
         return f"每隔 {schedule.interval_minutes} 分钟"
     return f"每天 {schedule.time or '09:00'}"

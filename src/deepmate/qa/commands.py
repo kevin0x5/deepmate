@@ -85,6 +85,10 @@ def looks_like_qa_request(text: str) -> bool:
         "体验验收",
         "发布前质量验收",
         "发布前验收",
+        "release-readiness audit",
+        "release readiness audit",
+        "pre-release audit",
+        "release audit",
     )
     if any(marker in clean for marker in explicit_markers):
         return any(marker in clean for marker in action_markers) or any(
@@ -117,6 +121,16 @@ def handle_qa_command(
     rest = parts[1].strip() if len(parts) > 1 else ""
     if action in {"help", "-h", "--help"}:
         return qa_help()
+    if looks_like_qa_request(raw):
+        _audit_id, message = start_audit(
+            raw,
+            workspace=workspace,
+            provider=provider,
+            model=model,
+            options=options,
+            allow_fallback=allow_fallback,
+        )
+        return message
     if action in {"audit", "plan", "start", "new"}:
         if not rest:
             return "Usage: /qa <测试目标>"

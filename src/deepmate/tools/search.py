@@ -14,7 +14,9 @@ from pathlib import Path
 from deepmate.runtime.process_env import subprocess_environment
 from deepmate.tools.filesystem import (
     DENIED_PATH_NAMES,
+    INTERNAL_WORKSPACE_DIR_NAMES,
     _is_denied_path,
+    _is_internal_workspace_dir,
     _relative_path,
     _workspace_path,
 )
@@ -135,7 +137,7 @@ def _ripgrep_matches(
         command.append("--ignore-case")
     if glob:
         command.extend(("--glob", glob))
-    for name in sorted(DENIED_PATH_NAMES):
+    for name in sorted(DENIED_PATH_NAMES | INTERNAL_WORKSPACE_DIR_NAMES):
         command.extend(("--glob", f"!**/{name}"))
         command.extend(("--glob", f"!**/{name}/**"))
     for suffix in (".key", ".p12", ".pem", ".pfx"):
@@ -176,7 +178,7 @@ def _ripgrep_matches(
         if not isinstance(raw_path, str) or not isinstance(text, str):
             continue
         path = Path(raw_path).resolve()
-        if _is_denied_path(root, path):
+        if _is_denied_path(root, path) or _has_internal_workspace_parent(root, path):
             continue
         column = 1
         if isinstance(submatches, list) and submatches:
@@ -323,7 +325,10 @@ def _walkable_directory(root: Path, path: Path) -> bool:
     try:
         if path.is_symlink():
             return False
-        return not _safe_is_denied_path(root, path)
+        return not _safe_is_denied_path(root, path) and not _is_internal_workspace_dir(
+            root,
+            path,
+        )
     except RuntimeError:
         return False
 
@@ -333,6 +338,14 @@ def _safe_is_denied_path(root: Path, path: Path) -> bool:
         return _is_denied_path(root, path)
     except RuntimeError:
         return True
+
+
+def _has_internal_workspace_parent(root: Path, path: Path) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    return bool(relative.parts and relative.parts[0] in INTERNAL_WORKSPACE_DIR_NAMES)
 
 
 def _safe_path_kind(path: Path) -> str | None:

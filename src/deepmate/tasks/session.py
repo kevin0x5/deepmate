@@ -135,7 +135,6 @@ class TaskSessionController:
 
     def format_status(self) -> str:
         """Return a compact Task Mode status summary."""
-        self.store.ensure()
         state = self.store.read_state()
         documents = self.store.read_documents()
         active = self._stage or (state.stage if state is not None else None)

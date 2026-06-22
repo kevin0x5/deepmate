@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -461,6 +462,67 @@ class QaAuditTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertNotIn("QA Audit 方案已生成", stdout.getvalue())
             self.assertIn("Deepmate needs a model API key", stderr.getvalue())
+
+    def test_cli_qa_readme_release_readiness_example_creates_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "README.md").write_text("# Demo\n", encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            provider = FakeQaProvider()
+
+            with (
+                patch.dict(os.environ, {"STUB_API_KEY": "test-key"}),
+                patch(
+                    "deepmate.channels.cli.ChatCompletionsProvider",
+                    lambda base_url, api_key: provider,
+                ),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                code = main(
+                    (
+                        "--workspace",
+                        str(workspace),
+                        "--qa",
+                        "Run a release-readiness audit for the web app.",
+                    )
+                )
+
+            self.assertEqual(code, 0, stderr.getvalue())
+            self.assertIn("QA Audit 方案已生成", stdout.getvalue())
+            self.assertIn("release-readiness audit", stdout.getvalue())
+            self.assertTrue((workspace / "qa" / "audits").exists())
+
+    def test_cli_qa_falls_back_when_planner_returns_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "README.md").write_text("# Demo\n", encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            provider = FakeQaProvider(content="not json")
+
+            with (
+                patch.dict(os.environ, {"STUB_API_KEY": "test-key"}),
+                patch(
+                    "deepmate.channels.cli.ChatCompletionsProvider",
+                    lambda base_url, api_key: provider,
+                ),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                code = main(
+                    (
+                        "--workspace",
+                        str(workspace),
+                        "--qa",
+                        "Run a release-readiness audit for the web app.",
+                    )
+                )
+
+            self.assertEqual(code, 0, stderr.getvalue())
+            self.assertIn("QA Audit 方案已生成", stdout.getvalue())
+            self.assertTrue((workspace / "qa" / "audits").exists())
 
 
 if __name__ == "__main__":

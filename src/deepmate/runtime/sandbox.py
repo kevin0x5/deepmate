@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -249,12 +250,12 @@ def _seatbelt_profile(policy: SandboxPolicy) -> str:
         for path in _seatbelt_readable_paths(policy)
     )
     deny_lines = tuple(
-        f"(deny file-read* file-write* (subpath {_sbpl_string(path)}))"
+        f"(deny file-read* file-write* {_seatbelt_path_filter(path)})"
         for path in _sensitive_workspace_paths(policy.workspace)
     )
     git_path = policy.workspace / ".git"
     home_deny_lines = tuple(
-        f"(deny file-read* file-write* (subpath {_sbpl_string(path)}))"
+        f"(deny file-read* file-write* {_seatbelt_path_filter(path)})"
         for path in _sensitive_home_paths()
     )
     return "\n".join(
@@ -262,10 +263,12 @@ def _seatbelt_profile(policy: SandboxPolicy) -> str:
             "(version 1)",
             "(deny default)",
             "(allow process*)",
+            "(allow file-read-data)",
+            "(allow file-read-metadata)",
             *readable_paths,
             f"(allow file-write* (subpath {workspace}))",
             f"(allow file-write* (subpath {cwd}))",
-            f"(deny file-write* (subpath {_sbpl_string(git_path)}))",
+            f"(deny file-write* {_seatbelt_path_filter(git_path)})",
             *deny_lines,
             *home_deny_lines,
             network.rstrip(),
@@ -337,6 +340,30 @@ def _bwrap_argv(
 
 def _sbpl_string(path: Path) -> str:
     escaped = str(path).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _seatbelt_path_filter(path: Path) -> str:
+    if path.is_dir():
+        return f"(subpath {_sbpl_string(path)})"
+    return f"(regex #{_sbpl_regex(_resolved_path_regex(path))})"
+
+
+def _resolved_path_regex(path: Path) -> str:
+    resolved = _safe_resolve(path)
+    variants = {str(resolved)}
+    if str(resolved).startswith("/private/"):
+        variants.add(str(resolved)[len("/private") :])
+    else:
+        private_path = Path("/private") / str(resolved).lstrip("/")
+        if private_path.exists() or str(resolved).startswith("/var/"):
+            variants.add(str(private_path))
+    escaped = sorted(re.escape(variant) for variant in variants)
+    return f"^({'|'.join(escaped)})(/.*)?$"
+
+
+def _sbpl_regex(pattern: str) -> str:
+    escaped = pattern.replace('"', '\\"')
     return f'"{escaped}"'
 
 

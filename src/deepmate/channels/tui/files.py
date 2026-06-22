@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from time import monotonic
 from pathlib import Path
 
-from deepmate.tools.filesystem import _is_denied_path
+from deepmate.tools.filesystem import INTERNAL_WORKSPACE_DIR_NAMES, _is_denied_path
 
 
 IGNORED_DIRS = {
@@ -26,7 +26,7 @@ IGNORED_DIRS = {
     "skillhub-cli",
     "skillhub_install",
     "var",
-}
+} | set(INTERNAL_WORKSPACE_DIR_NAMES)
 IGNORED_ROOT_FILES = {
     "skillhub_install.tar.gz",
     "skillhub-latest.tar.gz",

@@ -36,13 +36,18 @@ def start_audit(
             )
         plan, cases, markdown = create_fallback_audit_plan(goal, workspace=workspace)
     else:
-        plan, cases, markdown = create_audit_plan(
-            goal,
-            workspace=workspace,
-            provider=provider,
-            model=model,
-            options=options or {},
-        )
+        try:
+            plan, cases, markdown = create_audit_plan(
+                goal,
+                workspace=workspace,
+                provider=provider,
+                model=model,
+                options=options or {},
+            )
+        except ValueError:
+            if not allow_fallback:
+                raise
+            plan, cases, markdown = create_fallback_audit_plan(goal, workspace=workspace)
     paths = store.write_audit(plan, cases, plan_markdown=markdown)
     relative_plan = store.relative(paths.plan)
     relative_cases = store.relative(paths.cases)

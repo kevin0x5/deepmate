@@ -887,7 +887,7 @@ def _format_status(state: PreviewDeployState | None, workspace: Path) -> str:
             "stale": "临时预览已失效",
         }.get(state.status, "临时预览不可用")
         lines = [label]
-        if state.message:
+        if state.message and "本地预览已继续运行" not in state.message:
             lines.extend(["", state.message])
         lines.extend(["", "可以重新执行 /deploy 创建新的临时预览。"])
         return "\n".join(lines)

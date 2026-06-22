@@ -73,8 +73,15 @@ class _FakeLocalRuntime:
         self.prepared_calls.append(start_server)
         return self._prepared
 
-    def prepare_model(self, preset, *, progress=None, state_store=None):
-        self.prepare_calls.append((preset, state_store))
+    def prepare_model(
+        self,
+        preset,
+        *,
+        progress=None,
+        state_store=None,
+        install_missing_runtime=True,
+    ):
+        self.prepare_calls.append((preset, state_store, install_missing_runtime))
         if progress is not None:
             progress(type("Progress", (), {"message": "checking local model"})())
         if self._prepare_result is not None:
@@ -514,6 +521,7 @@ class RuntimeValidationTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("local ready", stdout.getvalue())
         self.assertEqual([call[0].id for call in runtime.prepare_calls], ["qwen3-local"])
+        self.assertEqual(runtime.prepare_calls[0][2], False)
         self.assertTrue(stderr.getvalue().strip())
 
     def test_noninteractive_local_provider_requires_prepared_model(self) -> None:

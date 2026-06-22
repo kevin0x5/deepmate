@@ -43,6 +43,21 @@ DENIED_PATH_NAMES = frozenset(
         "var",
     }
 )
+INTERNAL_WORKSPACE_DIR_NAMES = frozenset(
+    {
+        ".deepmate",
+        "checkpoints",
+        "config",
+        "cron",
+        "profiles",
+        "qa",
+        "reports",
+        "task",
+        "traces",
+        "transcripts",
+        "var",
+    }
+)
 DENIED_SUFFIXES = (".key", ".p12", ".pem", ".pfx")
 WorkspaceWriteCheckpoint = Callable[[str, Path, str], object]
 
@@ -173,7 +188,12 @@ def _list_directory(root: Path, arguments: Mapping[str, object]) -> NativeToolRe
 
     children = tuple(path.iterdir())
     allowed_children = sorted(
-        (child for child in children if not _is_denied_path(root, child)),
+        (
+            child
+            for child in children
+            if not _is_denied_path(root, child)
+            and not _is_internal_workspace_dir(root, child)
+        ),
         key=lambda child: (not child.is_dir(), child.name.lower()),
     )
     visible_children = allowed_children[:max_entries]
@@ -421,6 +441,19 @@ def _relative_path(root: Path, path: Path) -> str:
     if path == root:
         return "."
     return path.relative_to(root).as_posix()
+
+
+def _is_internal_workspace_dir(root: Path, path: Path) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    return bool(
+        relative.parts
+        and len(relative.parts) == 1
+        and path.is_dir()
+        and relative.parts[0] in INTERNAL_WORKSPACE_DIR_NAMES
+    )
 
 
 def _unified_diff(
