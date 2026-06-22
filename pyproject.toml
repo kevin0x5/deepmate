@@ -27,6 +27,15 @@ dependencies = [
   "textual>=0.60",
 ]
 
+[project.optional-dependencies]
+documents = [
+  "pypdf>=5.0",
+]
+dev = [
+  "build>=1.2",
+  "twine>=5.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/kevin0x5/deepmate"
 Repository = "https://github.com/kevin0x5/deepmate"

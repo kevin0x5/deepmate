@@ -20,23 +20,24 @@ Deepmate is a cost-first local AI workbench for long-running project work, with 
 Requirements: Python 3.11+ and a DeepSeek API key.
 
 ```bash
-git clone https://github.com/kevin0x5/deepmate.git
-cd deepmate
-python3 -m pip install -e .
+pip install deepmate
 export DEEPSEEK_API_KEY="<your-deepseek-api-key>"
-```
-
-## First Run
-
-```bash
-cd /path/to/your/project
 deepmate
 ```
 
-By default, `deepmate` opens the TUI and scopes file access, checkpoints, and tool permissions to the current workspace. For a one-shot CLI check:
+By default, `deepmate` opens the TUI and scopes file access, checkpoints, and
+tool permissions to the current workspace. For a one-shot CLI check:
 
 ```bash
 deepmate --cli "Summarize this project in one paragraph."
+```
+
+For source development:
+
+```bash
+git clone https://github.com/kevin0x5/deepmate.git
+cd deepmate
+python3 -m pip install -e .
 ```
 
 ## Features
@@ -76,11 +77,9 @@ You normally do not need to edit YAML before first use. Deepmate creates
 `config/deepmate.yaml`, `config/providers.yaml`, and local profile files with
 safe defaults when it first opens a workspace.
 
-The only required setup is a model key:
+The only required setup is a model key in the environment:
 
 ```bash
-deepmate --setup-key
-# or
 export DEEPSEEK_API_KEY="<your-deepseek-api-key>"
 ```
 
