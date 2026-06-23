@@ -1565,8 +1565,8 @@ class WebResearchToolTests(unittest.TestCase):
         )
 
         with patch(
-            "deepmate.tools.url_safety.socket.getaddrinfo",
-            return_value=[_addr("192.0.2.34")],
+            "deepmate.tools.web.validate_public_url",
+            side_effect=_allow_public_url,
         ):
             with patch("deepmate.tools.web._open_public_request", return_value=response):
                 result = execute_native_tool_request(
@@ -1592,8 +1592,8 @@ class WebResearchToolTests(unittest.TestCase):
         )
 
         with patch(
-            "deepmate.tools.url_safety.socket.getaddrinfo",
-            return_value=[_addr("192.0.2.34")],
+            "deepmate.tools.web.validate_public_url",
+            side_effect=_allow_public_url,
         ):
             with patch("deepmate.tools.web._open_public_request", return_value=response):
                 result = execute_native_tool_request(
@@ -1622,8 +1622,8 @@ class WebResearchToolTests(unittest.TestCase):
         )
 
         with patch(
-            "deepmate.tools.url_safety.socket.getaddrinfo",
-            return_value=[_addr("192.0.2.34")],
+            "deepmate.tools.web.validate_public_url",
+            side_effect=_allow_public_url,
         ):
             with patch("deepmate.tools.web._open_public_request", return_value=response):
                 result = execute_native_tool_request(
@@ -1648,8 +1648,8 @@ class WebResearchToolTests(unittest.TestCase):
         )
 
         with patch(
-            "deepmate.tools.url_safety.socket.getaddrinfo",
-            return_value=[_addr("192.0.2.34")],
+            "deepmate.tools.web.validate_public_url",
+            side_effect=_allow_public_url,
         ):
             with patch("deepmate.tools.web._open_public_request", return_value=response):
                 result = execute_native_tool_request(
@@ -1680,8 +1680,8 @@ class WebResearchToolTests(unittest.TestCase):
         response = _FakeResponse(html, "https://html.duckduckgo.com/html/?q=x", "text/html")
 
         with patch(
-            "deepmate.tools.url_safety.socket.getaddrinfo",
-            return_value=[_addr("198.51.100.232")],
+            "deepmate.tools.web.validate_public_url",
+            side_effect=_allow_public_url,
         ):
             with patch("deepmate.tools.web._open_public_request", return_value=response):
                 result = execute_native_tool_request(
@@ -1712,8 +1712,8 @@ class WebResearchToolTests(unittest.TestCase):
             return response
 
         with patch(
-            "deepmate.tools.url_safety.socket.getaddrinfo",
-            return_value=[_addr("198.51.100.232")],
+            "deepmate.tools.web.validate_public_url",
+            side_effect=_allow_public_url,
         ):
             with patch("deepmate.tools.web._open_public_request", side_effect=fake_open):
                 result = execute_native_tool_request(
@@ -1741,8 +1741,8 @@ class WebResearchToolTests(unittest.TestCase):
         response = _FakeResponse(html, "https://html.duckduckgo.com/html/?q=x", "text/html")
 
         with patch(
-            "deepmate.tools.url_safety.socket.getaddrinfo",
-            return_value=[_addr("198.51.100.232")],
+            "deepmate.tools.web.validate_public_url",
+            side_effect=_allow_public_url,
         ):
             with patch("deepmate.tools.web._open_public_request", return_value=response):
                 result = execute_native_tool_request(
@@ -1789,8 +1789,8 @@ class WebResearchToolTests(unittest.TestCase):
         ]
 
         with patch(
-            "deepmate.tools.url_safety.socket.getaddrinfo",
-            return_value=[_addr("192.0.2.34")],
+            "deepmate.tools.web.validate_public_url",
+            side_effect=_allow_public_url,
         ):
             with patch("deepmate.tools.web._open_public_request", side_effect=responses):
                 result = execute_native_tool_request(
@@ -1821,8 +1821,8 @@ class WebResearchToolTests(unittest.TestCase):
         response = _FakeResponse(html, "https://html.duckduckgo.com/html/?q=x", "text/html")
 
         with patch(
-            "deepmate.tools.url_safety.socket.getaddrinfo",
-            return_value=[_addr("192.0.2.34")],
+            "deepmate.tools.web.validate_public_url",
+            side_effect=_reject_loopback_url,
         ):
             with patch("deepmate.tools.web._open_public_request", return_value=response):
                 result = execute_native_tool_request(
@@ -1847,8 +1847,8 @@ class WebResearchToolTests(unittest.TestCase):
         response = _FakeResponse(html, "https://html.duckduckgo.com/html/?q=x", "text/html")
 
         with patch(
-            "deepmate.tools.url_safety.socket.getaddrinfo",
-            return_value=[_addr("198.51.100.232")],
+            "deepmate.tools.web.validate_public_url",
+            side_effect=_allow_public_url,
         ):
             with patch("deepmate.tools.web._open_public_request", return_value=response):
                 result = execute_native_tool_request(
@@ -1899,8 +1899,13 @@ def _hook_context(event_name: HookEvent, action_type: HookActionType) -> HookRun
     )
 
 
-def _addr(address: str):
-    return (2, 1, 6, "", (address, 443))
+def _allow_public_url(_url: str) -> None:
+    return
+
+
+def _reject_loopback_url(url: str) -> None:
+    if "127.0.0.1" in url:
+        raise ValueError("private, loopback, link-local, and reserved URLs are not allowed")
 
 
 def _missing_marker_refs(svg: str) -> set[str]:

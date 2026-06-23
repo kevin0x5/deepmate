@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import base64
+import socket
 import tempfile
 import time
 import unittest
@@ -20,6 +21,21 @@ from deepmate.preview_deploy.tunnel import (
     PreviewTunnelProvider,
     PreviewTunnelStatus,
     _forward_tunnel_request,
+)
+
+
+def _local_socket_available() -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+    except OSError:
+        return False
+    return True
+
+
+_REQUIRES_LOCAL_SOCKET = unittest.skipUnless(
+    _local_socket_available(),
+    "local socket binding is not available in this environment",
 )
 
 
@@ -159,6 +175,7 @@ class PreviewDeployTests(unittest.TestCase):
             self.assertTrue(process.waited)
             self.assertNotIn(process.pid, deploy_commands._SUPERVISOR_PROCESSES)
 
+    @_REQUIRES_LOCAL_SOCKET
     def test_deploy_static_html_status_and_stop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -281,6 +298,7 @@ class PreviewDeployTests(unittest.TestCase):
 
             deploy_commands._SUPERVISOR_PROCESSES.pop(process.pid, None)
 
+    @_REQUIRES_LOCAL_SOCKET
     def test_deploy_does_not_replace_existing_preview_without_replace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -385,6 +403,7 @@ class PreviewDeployTests(unittest.TestCase):
         body = base64.b64decode(str(result["body_base64"])).decode("utf-8")
         self.assertIn("blocked unsupported method", body)
 
+    @_REQUIRES_LOCAL_SOCKET
     def test_relay_failure_keeps_local_preview_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -441,6 +460,7 @@ class PreviewDeployTests(unittest.TestCase):
             self.assertIn("临时预览已关闭", status_after_stop)
             self.assertNotIn("本地预览已继续运行", status_after_stop)
 
+    @_REQUIRES_LOCAL_SOCKET
     def test_exited_supervisor_is_marked_stale_and_process_ref_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -480,6 +500,7 @@ class PreviewDeployTests(unittest.TestCase):
             self.assertIn("临时预览已失效", status)
             self.assertNotIn(state.supervisor_pid, deploy_commands._SUPERVISOR_PROCESSES)
 
+    @_REQUIRES_LOCAL_SOCKET
     def test_static_preview_expires_by_wall_clock_ttl(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
