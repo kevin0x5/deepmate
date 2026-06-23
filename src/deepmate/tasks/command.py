@@ -26,7 +26,7 @@ class TaskPromptCommand:
 
 def parse_task_prompt_command(prompt: str) -> TaskPromptCommand | None:
     """Parse Task Mode commands from a prompt."""
-    text = prompt.strip()
+    text = _normalize_task_prompt(prompt)
     lowered = text.lower()
     for control in (TASK_STATUS, TASK_CLEAR):
         prefix = f"task/{control}"
@@ -45,6 +45,35 @@ def parse_task_prompt_command(prompt: str) -> TaskPromptCommand | None:
         if lowered.startswith(prefix + " "):
             return TaskPromptCommand(stage=stage, prompt=text[len(prefix) :].strip())
     return None
+
+
+def _normalize_task_prompt(prompt: str) -> str:
+    text = prompt.strip()
+    if not text.startswith("/task"):
+        return text
+    parts = text.split(maxsplit=2)
+    if not parts or parts[0] != "/task":
+        return text
+    if len(parts) == 1:
+        return "task/status"
+    raw_stage = parts[1].strip().lower()
+    remainder = parts[2].strip() if len(parts) >= 3 else ""
+    aliases = {
+        "--plan": "plan",
+        "plan": "plan",
+        "--execute": "execute",
+        "execute": "execute",
+        "--checkpoint": "checkpoint",
+        "checkpoint": "checkpoint",
+        "--status": "status",
+        "status": "status",
+        "--clear": "clear",
+        "clear": "clear",
+    }
+    stage = aliases.get(raw_stage)
+    if stage is None:
+        return text
+    return f"task/{stage}{' ' + remainder if remainder else ''}"
 
 
 def default_task_prompt(stage: TaskStage) -> str:

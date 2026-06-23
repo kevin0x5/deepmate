@@ -15,6 +15,7 @@ from deepmate.domain import (
     ProfileRef,
 )
 from deepmate.foundation import estimate_text_tokens
+from deepmate.capabilities.surface import CAPABILITY_RENDER_KIND_ORDER
 from deepmate.context.snapshot import (
     ContextFileChange,
     ContextFileRef,
@@ -43,11 +44,15 @@ CAPABILITY_GUIDANCE_SECTION = "capability_guidance"
 SELECTED_SKILLS_SECTION = "selected_skills"
 BROWSER_LOADER_TOOL_NAME = "load_browser_tools"
 LSP_TOOL_NAMES = frozenset(("lsp_definition", "lsp_references", "lsp_hover"))
-CAPABILITY_GROUPS = (
-    (CapabilityKind.SKILL, "skills"),
-    (CapabilityKind.NATIVE_TOOL, "native_tools"),
-    (CapabilityKind.MCP_SERVER, "mcp_servers"),
-    (CapabilityKind.MCP_TOOL, "mcp_tools"),
+CAPABILITY_GROUP_NAMES = {
+    CapabilityKind.SKILL: "skills",
+    CapabilityKind.NATIVE_TOOL: "native_tools",
+    CapabilityKind.MCP_SERVER: "mcp_servers",
+    CapabilityKind.MCP_TOOL: "mcp_tools",
+}
+CAPABILITY_GROUPS = tuple(
+    (kind, CAPABILITY_GROUP_NAMES[kind])
+    for kind in CAPABILITY_RENDER_KIND_ORDER
 )
 
 

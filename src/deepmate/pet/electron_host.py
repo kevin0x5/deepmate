@@ -13,8 +13,9 @@ from deepmate.pet.service import PetBackendService
 from deepmate.pet.state import PetStateStore
 from deepmate.providers import ModelProvider
 
-PET_UI_DIR = Path(__file__).resolve().parents[3] / "pet_ui"
-PET_ELECTRON_MAIN = PET_UI_DIR / "electron" / "main.js"
+SOURCE_PET_UI_DIR = Path(__file__).resolve().parents[3] / "pet_ui"
+PACKAGED_PET_UI_DIR = Path(__file__).resolve().parents[1] / "pet_ui"
+PET_RUNTIME_RELATIVE_DIR = Path("pet") / "ui_runtime"
 
 
 def run_pet_host(
@@ -42,9 +43,10 @@ def run_pet_host(
     stderr_file = tempfile.TemporaryFile("w+", encoding="utf-8")
     try:
         try:
+            pet_ui_dir = _pet_ui_dir(data_dir)
             process = subprocess.Popen(
                 command,
-                cwd=str(PET_UI_DIR),
+                cwd=str(pet_ui_dir),
                 env=_electron_env(),
                 stdout=subprocess.DEVNULL,
                 stderr=stderr_file,
@@ -92,12 +94,16 @@ def electron_pet_command(data_dir: str | Path | None) -> list[str] | None:
     """Return the Electron command for the pet frontend, if installed."""
     if data_dir is None:
         return None
-    electron = _electron_binary()
-    if electron is None or not PET_ELECTRON_MAIN.exists():
+    resolved = _electron_and_ui_dir(data_dir)
+    if resolved is None:
+        return None
+    electron, pet_ui_dir = resolved
+    main_js = pet_ui_dir / "electron" / "main.js"
+    if not main_js.exists():
         return None
     return [
         str(electron),
-        str(PET_ELECTRON_MAIN),
+        str(main_js),
         "--data-dir",
         str(Path(data_dir)),
     ]
@@ -106,24 +112,69 @@ def electron_pet_command(data_dir: str | Path | None) -> list[str] | None:
 def electron_pet_missing_message() -> str:
     """Return a user-facing message for missing Electron pet dependencies."""
     return (
-        "Desktop pet is optional, and its Electron frontend is not installed.\n"
-        "Normal Deepmate CLI/TUI runs continue without it.\n"
-        "To enable the pet from a source checkout, run:\n"
-        "  npm --prefix pet_ui install\n"
-        "This creates the ignored local directory pet_ui/node_modules/.\n"
-        "Or set DEEPMATE_PET_ELECTRON to an existing Electron binary.\n"
-        "Then retry `deepmate --pet` or `/pet on`."
+        "Desktop pet is optional and needs an Electron runtime before it can open.\n"
+        "Normal Deepmate CLI/TUI work continues without it.\n"
+        "Recommended: run `/pet setup` in the TUI, or set DEEPMATE_PET_ELECTRON "
+        "to an existing Electron binary.\n"
+        "From a source checkout you can also run `npm --prefix pet_ui install`, "
+        "then retry `deepmate --pet` or `/pet on`."
     )
 
 
-def _electron_binary() -> Path | None:
+def source_pet_ui_dir() -> Path:
+    """Return the source checkout pet UI directory."""
+    return SOURCE_PET_UI_DIR
+
+
+def packaged_pet_ui_dir() -> Path:
+    """Return the packaged pet UI asset directory."""
+    return PACKAGED_PET_UI_DIR
+
+
+def pet_runtime_ui_dir(data_dir: str | Path | None) -> Path:
+    """Return the writable local pet runtime directory."""
+    root = Path(data_dir).expanduser() if data_dir is not None else Path.home()
+    return root / PET_RUNTIME_RELATIVE_DIR
+
+
+def _pet_ui_dir(data_dir: str | Path | None = None) -> Path:
+    runtime = pet_runtime_ui_dir(data_dir)
+    if _local_electron_binary(runtime) is not None and (runtime / "electron" / "main.js").exists():
+        return runtime
+    if (SOURCE_PET_UI_DIR / "electron" / "main.js").exists():
+        return SOURCE_PET_UI_DIR
+    if (runtime / "electron" / "main.js").exists():
+        return runtime
+    return PACKAGED_PET_UI_DIR
+
+
+def _electron_binary(data_dir: str | Path | None = None) -> Path | None:
+    resolved = _electron_and_ui_dir(data_dir)
+    return resolved[0] if resolved is not None else None
+
+
+def _electron_and_ui_dir(data_dir: str | Path | None = None) -> tuple[Path, Path] | None:
     override = os.environ.get("DEEPMATE_PET_ELECTRON", "").strip()
     if override:
         binary = Path(override).expanduser()
         if binary.exists():
-            return binary
+            return binary, _pet_ui_dir(data_dir)
+    for ui_dir in (
+        SOURCE_PET_UI_DIR,
+        pet_runtime_ui_dir(data_dir),
+        PACKAGED_PET_UI_DIR,
+    ):
+        if not (ui_dir / "electron" / "main.js").exists():
+            continue
+        local = _local_electron_binary(ui_dir)
+        if local is not None:
+            return local, ui_dir
+    return None
+
+
+def _local_electron_binary(ui_dir: Path) -> Path | None:
     bin_name = "electron.cmd" if os.name == "nt" else "electron"
-    local = PET_UI_DIR / "node_modules" / ".bin" / bin_name
+    local = ui_dir / "node_modules" / ".bin" / bin_name
     return local if local.exists() else None
 
 

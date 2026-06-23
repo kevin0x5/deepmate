@@ -874,7 +874,7 @@ class SkillInstallTests(unittest.TestCase):
             store = CapabilityStateStore.in_data_dir(data_dir, "default")
             install_skill_source(source, workspace, data_dir, store)
             cache = SessionApprovalCache()
-            cache.allow_for_session("shell:on:python3 scripts/setup.py")
+            cache.allow_for_session("capability:shell-network")
             registry = NativeToolRegistry(
                 skill_installer_tools(
                     workspace,

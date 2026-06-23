@@ -56,6 +56,7 @@ from deepmate.local import (
     OllamaLocalRuntime,
     ollama_api_url_from_provider_base_url,
 )
+from deepmate.pet.setup import PetSetupResult, prepare_pet_runtime
 from deepmate.channels.tui.render import (
     clean_input_text as _clean_input_text,
     compact_workspace_label as _compact_workspace_label,
@@ -362,24 +363,43 @@ class DeepmateTuiApp(App):
     """A lightweight TUI workbench over the existing Deepmate runtime."""
 
     CSS = """
+    * {
+        scrollbar-background: #333333;
+        scrollbar-color: #4a4a4a;
+        scrollbar-color-hover: #5a5a5a;
+        scrollbar-color-active: #6a6a6a;
+        scrollbar-corner-color: #333333;
+    }
     Screen {
         background: #333333;
         color: #d8d8d8;
+        border: none;
+        padding: 0;
+        margin: 0;
+        overflow: hidden;
     }
     Screen > .screen--selection {
         background: #4a5658;
         color: #f0f0f0;
+    }
+    DeepmateTuiApp {
+        background: #333333;
+        border: none;
+        padding: 0;
+        margin: 0;
     }
     #title-bar {
         background: #333333;
         color: #8fb7bd;
         height: 1;
         padding: 0 2;
+        margin: 0;
     }
     #session-row, #status-bar {
         background: #333333;
         color: #8a8a8a;
         height: 1;
+        margin: 0;
     }
     #session-tabs {
         width: auto;
@@ -398,6 +418,10 @@ class DeepmateTuiApp(App):
     }
     #body {
         height: 1fr;
+        background: #333333;
+        border: none;
+        padding: 0;
+        margin: 0;
     }
     #sidebar {
         width: 36;
@@ -751,6 +775,7 @@ class DeepmateTuiApp(App):
         self._exiting = False
         self._running_turn = False
         self._local_prepare_running = False
+        self._pet_setup_running = False
         self._local_ready_checked = False
         self._pending_approval: _PendingApproval | None = None
         self._approval_queue: list[_PendingApproval] = []
@@ -759,6 +784,7 @@ class DeepmateTuiApp(App):
         self._tool_turn_approvals_by_session: dict[str, set[str]] = {}
         self._tool_session_approvals: dict[str, set[str]] = {}
         self._approval_result_lines_by_session: dict[str, list[str]] = {}
+        self._last_approval_result_by_session: dict[str, str] = {}
         self._file_items: tuple[str, ...] = ()
         self._file_item_is_dir: tuple[bool, ...] = ()
         self._expanded_dirs: set[str] = set()
@@ -824,6 +850,7 @@ class DeepmateTuiApp(App):
         self._pet_process: subprocess.Popen | None = None
         self._live_status_text = ""
         self._live_message_active = False
+        self._chat_follow_tail = True
         self._last_prompt_paste_key = ""
         self._last_prompt_paste_at = 0.0
         self._spinner_timer = None
@@ -1039,6 +1066,9 @@ class DeepmateTuiApp(App):
         if value == "/queue":
             self._write(TuiMessage(kind="status", title="queue", body=self._queue_status_body()))
             return
+        if value == "/approvals":
+            self._show_approval_history()
+            return
         if value.startswith("/queue "):
             prompt = value[len("/queue ") :].strip()
             self._enqueue_prompt(prompt)
@@ -1096,12 +1126,18 @@ class DeepmateTuiApp(App):
         if self._command_hint_matches:
             current = _prompt_text(self.query_one("#prompt-input", TextArea)).strip()
             selected = self._selected_command_hint()
+            if _command_accepts_immediate_enter(current):
+                self._submit_prompt_editor()
+                return
             if (
                 selected
                 and current not in {selected, selected + " "}
-                and not _is_exact_command(current)
             ):
                 self._complete_selected_command()
+                current = _prompt_text(self.query_one("#prompt-input", TextArea)).strip()
+                if _command_accepts_immediate_enter(current):
+                    self._submit_prompt_editor()
+                    return
                 return
         self._submit_prompt_editor()
 
@@ -1159,10 +1195,17 @@ class DeepmateTuiApp(App):
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         if self._route_active_content_scroll_event(event, "scroll_down"):
             return
+        if self._active_tab == "main":
+            try:
+                self._chat_follow_tail = _is_scroll_at_end(self.query_one("#chat", RichLog))
+            except Exception:
+                self._chat_follow_tail = True
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         if self._route_active_content_scroll_event(event, "scroll_up"):
             return
+        if self._active_tab == "main":
+            self._chat_follow_tail = False
 
     def on_leave(self, event: events.Leave) -> None:
         control = getattr(event, "control", None)
@@ -1195,6 +1238,11 @@ class DeepmateTuiApp(App):
             return
         focused = self._safe_focused()
         focused_prompt = isinstance(focused, TextArea) and focused.id == "prompt-input"
+        if self._command_hint_matches and event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            self._hide_command_hints()
+            return
         if focused_prompt and event.key == "shift+enter":
             return
         if focused_prompt and event.key == "enter":
@@ -1203,10 +1251,6 @@ class DeepmateTuiApp(App):
             self._handle_prompt_editor_enter()
             return
         if event.key in {"up", "down"}:
-            if self._handle_prompt_history_key(event.key):
-                event.prevent_default()
-                event.stop()
-                return
             if self._command_hint_matches:
                 event.prevent_default()
                 event.stop()
@@ -1215,6 +1259,10 @@ class DeepmateTuiApp(App):
                     self._command_hint_index + delta
                 ) % len(self._command_hint_matches)
                 self._render_command_hints()
+                return
+            if self._handle_prompt_history_key(event.key):
+                event.prevent_default()
+                event.stop()
                 return
         if self._command_hint_matches and event.key in {"ctrl+up", "ctrl+down"}:
             event.prevent_default()
@@ -1430,6 +1478,9 @@ class DeepmateTuiApp(App):
 
     def action_help(self) -> None:
         self._handle_immediate_command("/commands")
+
+    def action_show_approvals(self) -> None:
+        self._show_approval_history()
 
     def action_paste_clipboard(self) -> None:
         try:
@@ -2127,6 +2178,8 @@ class DeepmateTuiApp(App):
         return self._handle_session_browser_command(clean)
 
     def _handle_immediate_command(self, prompt: str) -> bool:
+        if prompt.strip().startswith("/task "):
+            return False
         if not _is_immediate_command(prompt):
             return False
         if self._handle_verbose_command(prompt):
@@ -2144,6 +2197,7 @@ class DeepmateTuiApp(App):
         if result.messages:
             self._append_messages(result.messages)
             self._handle_pet_start_request(result.messages)
+            self._handle_pet_setup_request(result.messages)
         if result.local_prepare is not None:
             self._start_local_prepare(result.local_prepare)
         if (
@@ -2229,7 +2283,7 @@ class DeepmateTuiApp(App):
         log = self.query_one("#chat", RichLog)
         rendered = _render_message(message)
         log.write(rendered, expand=_should_expand_message(message.kind))
-        log.scroll_end(animate=False, immediate=True)
+        self._maybe_scroll_chat_end(log)
 
     def _append_main_message(self, message: TuiMessage) -> bool:
         """Append a chat message, keeping live work status pinned last."""
@@ -2784,7 +2838,7 @@ class DeepmateTuiApp(App):
                     _render_message(message),
                     expand=_should_expand_message(message.kind),
                 )
-            log.scroll_end(animate=False, immediate=True)
+            self._maybe_scroll_chat_end(log)
             return
         log.display = False
         markdown.display = True
@@ -2924,13 +2978,26 @@ class DeepmateTuiApp(App):
             else self.query_one("#content-markdown", _SelectableRichLog)
         )
         if action == "page_up":
+            self._chat_follow_tail = False
             target.scroll_page_up(animate=False)
         elif action == "page_down":
             target.scroll_page_down(animate=False)
+            if self._active_tab == "main":
+                self._chat_follow_tail = _is_scroll_at_end(target)
         elif action == "home":
+            self._chat_follow_tail = False
             target.scroll_home(animate=False)
         elif action == "end":
+            if self._active_tab == "main":
+                self._chat_follow_tail = True
             target.scroll_end(animate=False)
+
+    def _maybe_scroll_chat_end(self, log: object) -> None:
+        if self._chat_follow_tail:
+            try:
+                log.scroll_end(animate=False, immediate=True)
+            except TypeError:
+                log.scroll_end(animate=False)
 
     def _route_active_content_scroll_event(self, event: object, action: str) -> bool:
         widget_id = getattr(getattr(event, "widget", None), "id", "") or ""
@@ -3001,6 +3068,120 @@ class DeepmateTuiApp(App):
             )
             return
         self.set_timer(PET_START_CHECK_SECONDS, self._report_pet_start_result)
+
+    def _handle_pet_setup_request(self, messages: Iterable[TuiMessage]) -> None:
+        if not any("pet_setup_requested=true" in message.refs for message in messages):
+            return
+        if self._pet_setup_running:
+            self._write(
+                TuiMessage(
+                    kind="status",
+                    title="desktop pet",
+                    body="Desktop pet setup is already running.",
+                )
+            )
+            return
+        data_dir = self.state.data_dir
+        if data_dir is None:
+            self._write(
+                TuiMessage(
+                    kind="error",
+                    title="desktop pet",
+                    body="Desktop pet setup needs a Deepmate data directory.",
+                )
+            )
+            return
+        approval_key = "capability:pet-runtime-setup"
+        cache = self.state.approval_cache
+        allowed = (
+            cache is not None
+            and (cache.is_allowed(approval_key) or cache.consume_once(approval_key))
+        )
+        if not allowed:
+            result = self._request_approval(
+                "Pet setup approval",
+                "\n".join(
+                    (
+                        "Install the optional Electron runtime for the desktop pet.",
+                        f"Location: {data_dir / 'pet' / 'ui_runtime'}",
+                        "Network: npm registry and Electron download host.",
+                        f"Scope: {approval_key}",
+                        "Allow once: applies to this setup run only.",
+                        "Allow for session: remembered until Deepmate exits.",
+                    )
+                ),
+                subtitle="network",
+                subject="desktop pet runtime setup",
+                refs=(f"approval_key={approval_key}", "network=on"),
+                session_id=self.state.session.session_id,
+            )
+            if result == "deny":
+                self._write(
+                    TuiMessage(
+                        kind="warning",
+                        title="desktop pet",
+                        body="Desktop pet setup was denied.",
+                    )
+                )
+                return
+            if cache is not None:
+                if result == "session":
+                    cache.allow_for_session(approval_key)
+                elif result == "once":
+                    cache.allow_once(approval_key)
+        self._start_pet_setup(data_dir)
+
+    def _start_pet_setup(self, data_dir: Path) -> None:
+        self._pet_setup_running = True
+        self._running_turn = True
+        self._start_live_work("正在安装桌面宠物运行时")
+        self._refresh_footer()
+        self.run_worker(
+            lambda: self._run_pet_setup_worker(data_dir),
+            thread=True,
+        )
+
+    def _run_pet_setup_worker(self, data_dir: Path) -> None:
+        try:
+            result = prepare_pet_runtime(
+                data_dir,
+                progress=lambda message: self._safe_call_from_thread(
+                    self._update_pet_setup_progress,
+                    message,
+                ),
+            )
+        except Exception as exc:
+            result = PetSetupResult(
+                ok=False,
+                ui_dir=data_dir / "pet" / "ui_runtime",
+                message=f"Desktop pet setup failed: {exc}",
+            )
+        self._safe_call_from_thread(self._finish_pet_setup_worker, result)
+
+    def _update_pet_setup_progress(self, message: str) -> None:
+        self._start_live_work(message)
+        self._refresh_footer_throttled()
+
+    def _finish_pet_setup_worker(self, result: PetSetupResult) -> None:
+        self._pet_setup_running = False
+        self._running_turn = bool(self._session_running)
+        self._clear_live_work()
+        if result.ok:
+            body = f"{result.message}\nRuntime directory: {result.ui_dir}"
+            kind = "status"
+        else:
+            details = []
+            if result.stderr:
+                details.append(f"stderr:\n{result.stderr}")
+            if result.stdout:
+                details.append(f"stdout:\n{result.stdout}")
+            body = f"{result.message}\nRuntime directory: {result.ui_dir}"
+            if details:
+                body += "\n\n" + "\n\n".join(details)
+            kind = "error"
+        self._write(TuiMessage(kind=kind, title="desktop pet", body=body))
+        self._refresh_footer()
+        self._maybe_start_next_queued_prompt()
 
     def _report_pet_start_result(self) -> None:
         process = self._pet_process
@@ -3628,7 +3809,10 @@ class DeepmateTuiApp(App):
 
     def _route_running_prompt(self, prompt: str) -> bool:
         clean = prompt.strip()
-        if clean.startswith("/") and clean != "/followup" and not clean.startswith(("/followup ", "/queue ")):
+        if clean.startswith("/") and clean != "/followup" and not clean.startswith(("/followup ", "/queue ", "/task ")):
+            if clean == "/approvals":
+                self._show_approval_history()
+                return True
             if (
                 self._handle_preview_command(clean)
                 or self._handle_find_command(clean)
@@ -4132,7 +4316,9 @@ class DeepmateTuiApp(App):
             "/queue",
             "/resume-queue",
             "/clear-queue",
+            "/approvals",
             "/clear",
+            "/approvals",
             "/session",
             "/session tree",
             "/tree",
@@ -4161,6 +4347,25 @@ class DeepmateTuiApp(App):
         if len(self._prompt_queue.pending) > 5:
             lines.append(f"... +{len(self._prompt_queue.pending) - 5} more")
         return "\n".join(lines)
+
+    def _show_approval_history(self) -> None:
+        lines = self._approval_result_lines_by_session.get(
+            self.state.session.session_id,
+            [],
+        )
+        body = (
+            "\n".join(lines)
+            if lines
+            else "No approvals have been resolved in this session."
+        )
+        self._show_detail("approvals", body)
+        self._write(
+            TuiMessage(
+                kind="status",
+                title="/approvals",
+                body="Approval history opened in a content tab.",
+            )
+        )
 
     def _pause_prompt_queue(self, reason: str) -> None:
         self._last_queue_pause_reason = reason.strip()
@@ -4393,7 +4598,8 @@ class DeepmateTuiApp(App):
             lines.append(line)
         if len(lines) > 8:
             del lines[: len(lines) - 8]
-        body = "\n".join(lines)
+        body = line or _approval_result_body(pending)
+        self._last_approval_result_by_session[session_id] = body
         message = TuiMessage(
             kind="permissions",
             title="permissions",
@@ -4633,7 +4839,20 @@ def _approval_ref_map(refs: tuple[str, ...]) -> dict[str, str]:
 
 def _tool_approval_key(tool: NativeTool, decision: ToolAccessDecision) -> str:
     ref_key = _approval_ref_map(decision.refs).get("approval_key", "").strip()
-    return ref_key or tool.name
+    if ref_key:
+        return ref_key
+    clean_tool = tool.name.strip()
+    if clean_tool == "run_shell_command":
+        return "capability:tool-shell"
+    if clean_tool.startswith("computer_"):
+        return f"capability:{clean_tool}"
+    if clean_tool in {"write_text_file", "edit_text_file"}:
+        return f"capability:{clean_tool}"
+    if clean_tool.startswith("browser_") or clean_tool == "load_browser_tools":
+        return "capability:browser"
+    if clean_tool.startswith("mcp.") or clean_tool in {"search_mcp_tools", "load_mcp_tool"}:
+        return "capability:mcp"
+    return clean_tool
 
 
 def _approval_action_summary(reason: str, tool: str) -> str:
@@ -4742,6 +4961,10 @@ def _approval_result_subject(pending: _PendingApproval) -> str:
 def _approval_key_subject(key: str) -> str:
     if key == "capability:shell":
         return "shell execution"
+    if key == "capability:shell-medium":
+        return "shell command outside the safe read-only set"
+    if key == "capability:shell-high":
+        return "higher-risk shell command"
     if key in {"capability:shell-network", "capability:network"}:
         return "shell network access"
     if key in {"capability:env_change", "capability:environment"}:
@@ -4755,6 +4978,10 @@ def _safety_approval_subject(decision: SafetyDecision) -> str:
     key = decision.approval_key.strip()
     if key == "capability:shell":
         return "shell execution"
+    if key == "capability:shell-medium":
+        return "shell command outside the safe read-only set"
+    if key == "capability:shell-high":
+        return "higher-risk shell command"
     if key in {"capability:shell-network", "capability:network"}:
         return "shell network access"
     if key in {"capability:env_change", "capability:environment"}:
@@ -5079,10 +5306,10 @@ def _pet_start_command(data_dir: Path | None) -> list[str] | None:
 
 def _pet_frontend_missing_message() -> str:
     return (
-        "Desktop pet is optional and needs Electron frontend dependencies. "
-        "Normal Deepmate runs continue without it. Run "
-        "`npm --prefix pet_ui install` from the source checkout to create the "
-        "ignored `pet_ui/node_modules/` directory, then retry `/pet on`."
+        "Desktop pet needs an Electron runtime before it can open. "
+        "Normal Deepmate work continues without it. Run `/pet setup` for the "
+        "one-time setup options, or set DEEPMATE_PET_ELECTRON to an existing "
+        "Electron binary, then retry `/pet on`."
     )
 
 
@@ -5256,9 +5483,57 @@ def _is_exact_command(prompt: str) -> bool:
     return clean in commands or clean in _EXACT_IMMEDIATE_COMMANDS
 
 
+def _command_accepts_immediate_enter(prompt: str) -> bool:
+    clean = prompt.strip()
+    return clean in _EXACT_IMMEDIATE_COMMANDS or clean in {
+        "/commands",
+        "/help",
+        "/?",
+        "/status",
+        "/task",
+        "/diff",
+        "/detail",
+        "/preview",
+        "/close-tab",
+        "/close-preview",
+        "/hide-preview",
+        "/files",
+        "/new",
+        "/new-session",
+        "/undo-clear",
+        "/verbose",
+        "/restore-draft",
+        "/pet",
+        "/local",
+        "/model",
+        "/sessions",
+        "/remote",
+        "/hooks",
+        "/cron",
+        "/skills",
+        "/mcp",
+        "/session",
+        "/session tree",
+        "/tree",
+        "/clone",
+        "/fork",
+        "/exit",
+        "/quit",
+    }
+
+
 def _is_generic_live_status(value: str) -> bool:
     clean = " ".join(value.strip().lower().split())
     return clean in {"working on", "preparing context..."}
+
+
+def _is_scroll_at_end(widget: object, *, tolerance: int = 1) -> bool:
+    try:
+        scroll_y = int(getattr(widget, "scroll_y", 0) or 0)
+        max_scroll_y = int(getattr(widget, "max_scroll_y", scroll_y) or 0)
+    except (TypeError, ValueError):
+        return True
+    return scroll_y >= max_scroll_y - tolerance
 
 
 def _is_specific_live_status(value: str) -> bool:
@@ -5295,8 +5570,11 @@ _EXACT_IMMEDIATE_COMMANDS = {
     "/mcp",
     "/remote",
     "/hooks",
-    "/cron",
-}
+        "/cron",
+        "/approvals",
+        "/exit",
+        "/quit",
+    }
 
 
 def _directory_input_path(

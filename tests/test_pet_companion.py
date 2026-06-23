@@ -13,7 +13,11 @@ from unittest.mock import patch
 
 from deepmate.channels.cli import main
 from deepmate.pet.copy import fallback_pet_copy, generate_pet_copy
-from deepmate.pet.electron_host import electron_pet_command, electron_pet_missing_message
+from deepmate.pet.electron_host import (
+    electron_pet_command,
+    electron_pet_missing_message,
+    pet_runtime_ui_dir,
+)
 from deepmate.pet.events import (
     PetVisualState,
     event_for_care_reminder,
@@ -314,10 +318,10 @@ class PetCompanionTests(unittest.TestCase):
             command = electron_pet_command(Path(tmp) / "var")
 
         if command is None:
-            self.assertIn("npm --prefix pet_ui install", electron_pet_missing_message())
+            self.assertIn("/pet setup", electron_pet_missing_message())
             self.assertIn("DEEPMATE_PET_ELECTRON", electron_pet_missing_message())
             self.assertIn("optional", electron_pet_missing_message())
-            self.assertIn("pet_ui/node_modules/", electron_pet_missing_message())
+            self.assertIn("Electron runtime", electron_pet_missing_message())
         else:
             self.assertIn("--data-dir", command)
 
@@ -336,8 +340,8 @@ class PetCompanionTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         message = stderr.getvalue()
         self.assertIn("Desktop pet is optional", message)
-        self.assertIn("npm --prefix pet_ui install", message)
-        self.assertIn("pet_ui/node_modules/", message)
+        self.assertIn("/pet setup", message)
+        self.assertIn("Electron runtime", message)
 
     def test_electron_pet_command_accepts_binary_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -349,6 +353,25 @@ class PetCompanionTests(unittest.TestCase):
         self.assertIsNotNone(command)
         self.assertEqual(command[0], str(binary))
         self.assertIn("--data-dir", command)
+
+    def test_electron_pet_command_uses_data_dir_runtime_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "var"
+            source_dir = Path(tmp) / "missing-source-pet-ui"
+            ui_dir = pet_runtime_ui_dir(data_dir)
+            electron = ui_dir / "node_modules" / ".bin" / "electron"
+            main_js = ui_dir / "electron" / "main.js"
+            electron.parent.mkdir(parents=True)
+            main_js.parent.mkdir(parents=True)
+            electron.write_text("#!/bin/sh\n", encoding="utf-8")
+            main_js.write_text("console.log('pet')\n", encoding="utf-8")
+
+            with patch("deepmate.pet.electron_host.SOURCE_PET_UI_DIR", source_dir):
+                command = electron_pet_command(data_dir)
+
+        self.assertIsNotNone(command)
+        self.assertEqual(command[0], str(electron))
+        self.assertEqual(command[1], str(main_js))
 
     def test_copy_generation_uses_fallback_without_provider(self) -> None:
         profile = default_pet_profile("penguin")

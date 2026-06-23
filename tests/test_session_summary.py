@@ -10,6 +10,7 @@ from deepmate.channels.session_maintenance import (
 )
 from deepmate.domain import Message, MessageRole, ProfileRef
 from deepmate.providers import ModelConversationItem, ModelResponse, TokenUsage
+from deepmate.providers import ModelToolExchange, ModelToolRequest, ModelToolResult
 from deepmate.runtime import (
     ConversationBudgetPolicy,
     SessionSummaryInput,
@@ -106,9 +107,61 @@ class SessionSummaryTests(unittest.TestCase):
             request.conversation[1].message.content,
         )
         self.assertIn(
+            "Verified And Unverified State",
+            request.conversation[1].message.content,
+        )
+        self.assertIn(
+            "Next Actions",
+            request.conversation[1].message.content,
+        )
+        self.assertIn(
             "scoped product/project context",
             request.conversation[0].message.content,
         )
+
+    def test_summary_source_compacts_tool_result_content(self) -> None:
+        long_output = "line " * 400
+        source_input = SessionSummaryInput(
+            source_items=(
+                SessionSummarySourceItem(
+                    sequence=1,
+                    item=ModelConversationItem.from_tool_exchange(
+                        ModelToolExchange(
+                            assistant_content="I will inspect the file.",
+                            tool_requests=(
+                                ModelToolRequest(
+                                    id="call_1",
+                                    name="read_text_file",
+                                    raw_arguments='{"path":"big.log"}',
+                                ),
+                            ),
+                            tool_results=(
+                                ModelToolResult(
+                                    request_id="call_1",
+                                    name="read_text_file",
+                                    content=long_output,
+                                    refs=("path=big.log",),
+                                ),
+                            ),
+                        )
+                    ),
+                ),
+            )
+        )
+        provider = StubProvider(
+            ModelResponse(content="## Session Summary\n\n### User Goal\nContinue.")
+        )
+
+        generate_session_summary(
+            provider=provider,
+            model="deepseek-v4-flash",
+            summary_input=source_input,
+        )
+
+        prompt = provider.requests[0].conversation[1].message.content
+        self.assertIn("content_summary:", prompt)
+        self.assertIn("[truncated", prompt)
+        self.assertNotIn(long_output, prompt)
 
     def test_checkpoint_update_rejects_none_summary_content(self) -> None:
         source_input = SessionSummaryInput(

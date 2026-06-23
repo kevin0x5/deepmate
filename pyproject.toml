@@ -55,4 +55,12 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-deepmate = ["builtin_skills/*/SKILL.md"]
+deepmate = [
+  "builtin_skills/*/SKILL.md",
+  "pet_ui/package.json",
+  "pet_ui/package-lock.json",
+  "pet_ui/electron/*.js",
+  "pet_ui/renderer/*.html",
+  "pet_ui/renderer/*.js",
+  "pet_ui/renderer/styles/*.css",
+]

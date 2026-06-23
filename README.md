@@ -93,19 +93,39 @@ Edit `config/deepmate.yaml` or `config/providers.yaml` only when you want to
 switch providers, tune context budgets, or override the internal summary/memory
 models.
 
-Override per run:
+Override per run from the CLI when needed:
 
 ```bash
 deepmate --model deepseek-v4-pro --thinking enabled --reasoning-effort max "Review this design."
 ```
 
-Local model:
+Most daily work happens inside the TUI:
 
 ```bash
-deepmate          # then type /local to prepare and switch to Ollama
+deepmate
 ```
 
-## Common Commands
+Useful TUI commands:
+
+```text
+/local                         Prepare and switch to an Ollama-backed local model.
+/task plan <goal>              Create or update task/plan.md.
+/task execute                  Execute the current Task Mode plan.
+/task checkpoint <note>        Save a stage achievement under task/achievements/.
+/qa <goal>                     Create a QA Audit plan.
+/qa run                        Run approved QA checks.
+/cron add <schedule and job>   Create a recurring workspace job draft.
+/deploy ./dist                 Open a local/LAN/external preview.
+/pet setup                     Install or repair the desktop pet runtime.
+/pet on                        Start the desktop pet window.
+/session tree                  Inspect session lineage.
+/approvals                     Review approval history for the current session.
+```
+
+## CLI Reference
+
+The TUI is the default entry point. These CLI commands are available for scripts,
+checks, or one-shot runs:
 
 ```bash
 # Read-only inspection
@@ -117,7 +137,7 @@ deepmate --workspace-write "Update the README wording."
 # Shell (sandboxed, off by default)
 deepmate --shell "Run the focused tests for the TUI."
 
-# Task Mode
+# Task Mode from CLI
 deepmate --task plan "Plan the next auth module changes."
 deepmate --task execute "Implement the approved plan."
 deepmate --task checkpoint "Archive the current stage as an achievement."
@@ -147,11 +167,11 @@ deepmate --trust-workspace
 # Remote (Enterprise WeChat)
 deepmate --remote wecom
 
-# Pet
+# Desktop pet
+deepmate --pet-status
 deepmate --pet
 
-# Deploy preview
-# In `deepmate`: /deploy ./dist
+# Deploy preview is usually started from the TUI: /deploy ./dist
 
 # Observability
 deepmate --show-session <session-id> --trace-events 50

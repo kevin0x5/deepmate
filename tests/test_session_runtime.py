@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from deepmate.capabilities import CapabilitySurface
+from deepmate.domain import CapabilityKind, CapabilityRef
 from deepmate.domain import Message, MessageRole, ProfileRef
 from deepmate.providers import (
     ModelCapabilities,
@@ -407,6 +409,63 @@ class SessionRuntimeTests(unittest.TestCase):
             [
                 "system_context_cache_miss",
                 "system_context_cache_hit",
+                "system_context_cache_miss",
+            ],
+        )
+
+    def test_capability_order_change_invalidates_system_context_cache(self) -> None:
+        with _workspace() as workspace:
+            profile = ProfileRef(name="default", uri="profiles/default")
+            activation = start_runtime_activation(
+                session_id="session_1",
+                workspace=workspace,
+                profile=profile,
+            )
+            runtime = start_session_runtime(activation)
+            provider = StubProvider(
+                [
+                    ModelResponse(content="first"),
+                    ModelResponse(content="second"),
+                ]
+            )
+            trace_sink = _TraceSink()
+            read_ref = CapabilityRef(
+                kind=CapabilityKind.NATIVE_TOOL,
+                name="read_text_file",
+                description="Read a workspace file.",
+            )
+            search_ref = CapabilityRef(
+                kind=CapabilityKind.NATIVE_TOOL,
+                name="search_workspace",
+                description="Search workspace files.",
+            )
+            first_surface = CapabilitySurface((read_ref, search_ref))
+            second_surface = CapabilitySurface((search_ref, read_ref))
+
+            first = runtime.run_user_turn(
+                provider=provider,
+                messages=(Message(role=MessageRole.USER, content="first"),),
+                model="stub-model",
+                capability_surface=first_surface,
+                trace_recorder=TraceRecorder(trace_sink),
+            )
+            first.runtime.run_user_turn(
+                provider=provider,
+                messages=(Message(role=MessageRole.USER, content="second"),),
+                model="stub-model",
+                capability_surface=second_surface,
+                trace_recorder=TraceRecorder(trace_sink),
+            )
+
+        cache_events = [
+            event.kind
+            for event in trace_sink.events
+            if event.kind in {"system_context_cache_hit", "system_context_cache_miss"}
+        ]
+        self.assertEqual(
+            cache_events,
+            [
+                "system_context_cache_miss",
                 "system_context_cache_miss",
             ],
         )

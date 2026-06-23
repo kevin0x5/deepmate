@@ -7,6 +7,7 @@ from pathlib import Path
 
 from deepmate.channels.session_maintenance import (
     _apply_memory_patch_after_checkpoint,
+    _filter_checkpoint_memory_patch,
     _memory_source_sequences_from_transcript_records,
     _memory_source_sequences_from_summary_input,
     _memory_source_text_from_summary_input,
@@ -109,6 +110,33 @@ class SessionMaintenanceTests(unittest.TestCase):
             (1, 3),
         )
 
+    def test_checkpoint_memory_patch_filter_requires_user_source_alignment(self) -> None:
+        filtered, unsupported_count = _filter_checkpoint_memory_patch(
+            MemoryPatch(
+                operations=(
+                    MemoryPatchOperation(
+                        action="write_user",
+                        content="用户偏好中文直接回答。",
+                    ),
+                    MemoryPatchOperation(
+                        action="write_user",
+                        content="用户偏好英文直接回答。",
+                    ),
+                    MemoryPatchOperation(
+                        action="replace",
+                        target="user",
+                        replace_ref="用户偏好中文直接回答。",
+                        content="用户偏好英文直接回答。",
+                    ),
+                )
+            ),
+            "### User transcript item 1\n以后请用中文直接回答。",
+        )
+
+        self.assertEqual(unsupported_count, 2)
+        self.assertEqual(len(filtered.operations), 1)
+        self.assertEqual(filtered.operations[0].content, "用户偏好中文直接回答。")
+
     def test_session_end_records_pending_memory_without_model_call(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -193,7 +221,7 @@ class SessionMaintenanceTests(unittest.TestCase):
             _transcript_record(
                 sequence=2,
                 role=MessageRole.USER,
-                content="api key is sk-abcdefghijklmnopqrstuvwxyz",
+                content="api key is API_KEY_PLACEHOLDER_REDACTED",
             ),
             _transcript_record(
                 sequence=3,
@@ -259,7 +287,10 @@ class SessionMaintenanceTests(unittest.TestCase):
                     SessionSummarySourceItem(
                         sequence=1,
                         item=ModelConversationItem.from_message(
-                            Message(role=MessageRole.USER, content="以后请用中文直接回答。")
+                            Message(
+                                role=MessageRole.USER,
+                                content="以后请用中文直接回答。本项目统一使用 pnpm。",
+                            )
                         ),
                     ),
                 )
@@ -342,6 +373,101 @@ class SessionMaintenanceTests(unittest.TestCase):
                 "context_snapshot_refreshed",
                 tuple(event.kind for event in sink.events),
             )
+
+    def test_checkpoint_memory_patch_rejects_unsupported_user_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            deepmate_home = root / "home"
+            global_profile_dir = deepmate_home / "profiles" / "default"
+            project_profile_dir = workspace / "profiles" / "default"
+            global_profile_dir.mkdir(parents=True)
+            project_profile_dir.mkdir(parents=True)
+            (workspace / "AGENTS.md").write_text("# Rules\n", encoding="utf-8")
+            (global_profile_dir / "identity.md").write_text(
+                "# Identity\n",
+                encoding="utf-8",
+            )
+            (global_profile_dir / "soul.md").write_text("# Soul\n", encoding="utf-8")
+            (global_profile_dir / "user.md").write_text("", encoding="utf-8")
+            (global_profile_dir / "memory.md").write_text("", encoding="utf-8")
+            (project_profile_dir / "memory.md").write_text("", encoding="utf-8")
+            settings = AppSettings(
+                workspace=workspace,
+                data_dir=root / "var",
+                deepmate_home=deepmate_home,
+                active_profile="default",
+                trace_sink=root / "trace.jsonl",
+                default_provider="deepseek",
+                context=ContextSettings(
+                    response_token_reserve=0,
+                    safety_margin_tokens=0,
+                ),
+            )
+            session_store = SessionStore.in_directory(root / "sessions")
+            session = session_store.create(
+                workspace=workspace,
+                profile=settings.profile_ref(),
+                title="unsupported memory patch test",
+            )
+            activation = start_runtime_activation(
+                session_id=session.session_id,
+                workspace=workspace,
+                profile=session.profile,
+            )
+            runtime = start_session_runtime(activation)
+            summary_input = SessionSummaryInput(
+                source_items=(
+                    SessionSummarySourceItem(
+                        sequence=1,
+                        item=ModelConversationItem.from_message(
+                            Message(role=MessageRole.USER, content="以后请用中文直接回答。")
+                        ),
+                    ),
+                    SessionSummarySourceItem(
+                        sequence=2,
+                        item=ModelConversationItem.from_message(
+                            Message(role=MessageRole.ASSISTANT, content="本项目使用 pnpm。")
+                        ),
+                    ),
+                )
+            )
+            summary_record = SessionSummaryRecord.create(
+                session_id=session.session_id,
+                content="## Session Summary\n\n### User Goal\n测试 unsupported memory patch。",
+                covered_until_sequence=2,
+                covered_item_count=2,
+                source_item_count=2,
+                estimated_source_tokens=20,
+                source_model="deepseek-v4-pro",
+            )
+            sink = ListTraceSink()
+
+            result = _apply_memory_patch_after_checkpoint(
+                settings=settings,
+                session=session,
+                runtime=runtime,
+                summary_input=summary_input,
+                summary_record=summary_record,
+                memory_patch=MemoryPatch(
+                    operations=(
+                        MemoryPatchOperation(
+                            action="write_project_memory",
+                            content="本项目统一使用 pnpm。",
+                        ),
+                    )
+                ),
+                trace_recorder=TraceRecorder(sink),
+            )
+
+            self.assertEqual(result.status, "skipped")
+            self.assertEqual(result.skipped_count, 1)
+            self.assertIn("reason=unsupported_by_user_source", result.refs)
+            self.assertEqual(
+                (project_profile_dir / "memory.md").read_text(encoding="utf-8"),
+                "",
+            )
+            self.assertIn("memory_patch_skipped", tuple(event.kind for event in sink.events))
 
     def test_session_maintenance_prunes_unreferenced_tool_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

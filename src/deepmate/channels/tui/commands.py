@@ -34,6 +34,7 @@ from deepmate.local import (
     recommended_local_model,
 )
 from deepmate.pet.state import PET_PRESETS, PetProfile
+from deepmate.pet.setup import pet_setup_status
 from deepmate.providers import ChatCompletionsProvider
 from deepmate.runtime import (
     ConversationBudgetPolicy,
@@ -71,6 +72,10 @@ def command_suggestions() -> tuple[str, ...]:
         "/find <keyword> - Search the active content tab.",
         "/workspace <folder> - Restart the TUI in another workspace.",
         "/setup-key <api_key> - Save the model API key locally for this workspace.",
+        "/task plan <goal> - Create or update the Task Mode plan.",
+        "/task execute - Execute the current Task Mode plan.",
+        "/task status - Show Task Mode state and files.",
+        "/task checkpoint <note> - Save a Task Mode achievement checkpoint.",
         "/cron add <schedule and job> - Create a workspace scheduled job draft.",
         "/cron list|status|approve|pause|resume|remove - Manage scheduled jobs.",
         "/qa <goal> - Create a QA Audit plan, cases, and permission preview.",
@@ -86,6 +91,7 @@ def command_suggestions() -> tuple[str, ...]:
         "/search <query> - Search the public web.",
         "/pet - Show desktop pet status and quick actions.",
         "/pet on - Start the desktop pet window.",
+        "/pet setup - Install or repair the desktop pet Electron runtime.",
         "/pet select dog|cat|squirrel|penguin - Select the desktop pet.",
         "/pet learning off|low|standard - Set pet learning mode.",
         "/pet bubble smart|frugal - Set pet bubble generation mode.",
@@ -98,6 +104,7 @@ def command_suggestions() -> tuple[str, ...]:
         "/queue - Show prompts queued while the agent is running.",
         "/resume-queue - Resume paused queued prompts.",
         "/clear-queue - Clear queued prompts.",
+        "/approvals - Open approval history for this session.",
         "/clear - Clear the visible chat display; transcript and context are kept.",
         "/undo-clear - Restore the last cleared chat display.",
         "/verbose - Toggle streaming of the model's reasoning in the live cell.",
@@ -905,9 +912,24 @@ def apply_local_model_prepare_result(
             ),
         )
     context_prepared = _switch_to_local_model(state, request.preset)
+    if state.provider_name != LOCAL_PROVIDER_NAME or state.model != request.preset.runtime_name:
+        return TuiCommandResult(
+            True,
+            messages=(
+                TuiMessage(
+                    kind="warning",
+                    title=request.source,
+                    body=(
+                        f"{request.preset.short_label} 已就绪，但 Deepmate 没有成功切换到本地模型。"
+                        f"当前模型仍是 {state.model}。"
+                    ),
+                    preview=_local_status(state),
+                ),
+            ),
+        )
     body = (
         f"{request.preset.short_label}（{request.preset.label}）已就绪，"
-        "后续对话将使用本地模型。"
+        f"后续对话将使用本地模型：{state.model}。"
     )
     if context_prepared:
         body += "\n当前会话较长，已自动整理上下文。"
@@ -1044,6 +1066,36 @@ def _handle_pet_command(prompt: str, state: TuiRuntimeState) -> TuiCommandResult
                     ),
                 ),
             )
+        if action == "setup":
+            status = pet_setup_status(state.data_dir)
+            if status.ready:
+                return TuiCommandResult(
+                    True,
+                    messages=(
+                        TuiMessage(
+                            kind="status",
+                            title="desktop pet",
+                            body="Desktop pet runtime is ready. Use /pet on to open it.",
+                            preview=_pet_setup_preview(status),
+                        ),
+                    ),
+                )
+            return TuiCommandResult(
+                True,
+                messages=(
+                    TuiMessage(
+                        kind="status",
+                        title="desktop pet",
+                        body=(
+                            "Desktop pet setup is ready to install Electron into "
+                            "Deepmate's local data directory. Approve the setup "
+                            "prompt to continue."
+                        ),
+                        refs=("pet_setup_requested=true",),
+                        preview=_pet_setup_preview(status),
+                    ),
+                ),
+            )
         if action == "select":
             if len(parts) < 3:
                 return _pet_usage("Usage: /pet select dog|cat|squirrel|penguin")
@@ -1076,7 +1128,7 @@ def _handle_pet_command(prompt: str, state: TuiRuntimeState) -> TuiCommandResult
             messages=(TuiMessage(kind="error", title="/pet", body=str(exc)),),
         )
     return _pet_usage(
-        "Usage: /pet, /pet on, /pet select <pet>, /pet learning <mode>, or /pet bubble <mode>"
+        "Usage: /pet, /pet on, /pet setup, /pet select <pet>, /pet learning <mode>, or /pet bubble <mode>"
     )
 
 
@@ -1105,6 +1157,31 @@ def _pet_updated(profile: PetProfile, learning_sources: object = None) -> TuiCom
                 preview=_format_pet_profile(profile),
             ),
         ),
+    )
+
+
+def _pet_setup_preview(status=None) -> str:
+    ready = bool(getattr(status, "ready", False))
+    ui_dir = str(getattr(status, "ui_dir", "") or "")
+    message = str(getattr(status, "message", "") or "")
+    return "\n".join(
+        (
+            "Desktop Pet Setup",
+            "",
+            f"Status: {'ready' if ready else 'not ready'}",
+            f"Detail: {message or 'Electron runtime is required before the pet can open.'}",
+            f"Runtime directory: {ui_dir or '(unavailable)'}",
+            "",
+            "Deepmate includes the pet UI assets in the Python package. /pet setup installs the optional Electron runtime into Deepmate's local data directory, not into your project.",
+            "",
+            "Options",
+            "- If Electron is already installed, set DEEPMATE_PET_ELECTRON to that binary.",
+            "- To use a faster Electron mirror, set DEEPMATE_PET_ELECTRON_MIRROR before running /pet setup.",
+            "- From a source checkout, npm --prefix pet_ui install also works.",
+            "- After setup, run /pet on.",
+            "",
+            "The pet reads Deepmate local state only; it does not watch the screen, keyboard, camera, or microphone.",
+        )
     )
 
 
@@ -1371,11 +1448,11 @@ def _commands_preview() -> str:
             "Task",
             (
                 "/task",
-                "task/plan",
-                "task/execute",
-                "task/status",
-                "task/checkpoint",
-                "task/clear",
+                "/task plan",
+                "/task execute",
+                "/task status",
+                "/task checkpoint",
+                "/task clear",
             ),
         ),
         ("QA", ("/qa",)),
@@ -1404,8 +1481,8 @@ def _commands_preview() -> str:
         lines.extend(("", "Other"))
         lines.extend(f"  {entry}" for entry in remaining)
     lines.append("")
-    lines.append("Task Mode uses task/plan for the task contract and task/execute for the execution loop.")
-    lines.append("Use task/status to inspect runtime state, task/checkpoint to save a manual achievement, and task/clear to clear local runtime state.")
+    lines.append("Task Mode uses /task plan for the task contract and /task execute for the execution loop.")
+    lines.append("Use /task status to inspect runtime state, /task checkpoint to save a manual achievement, and /task clear to clear local runtime state.")
     return "\n".join(lines)
 
 

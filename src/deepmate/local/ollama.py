@@ -247,6 +247,26 @@ class OllamaLocalRuntime:
             time.sleep(0.5)
             verified = self.health_check(preset)
             if not verified.ok:
+                if self.has_runtime_model(preset):
+                    _record_state(
+                        state_store,
+                        preset,
+                        "ready",
+                        (
+                            f"{preset.label} 已下载并可由 Ollama 发现；"
+                            "本次跳过接口试答，后续对话将直接使用本地模型。"
+                        ),
+                        status="ready",
+                    )
+                    return LocalModelInstallResult(
+                        ok=True,
+                        preset=preset,
+                        message=(
+                            f"{preset.label} 已下载并可由 Ollama 发现；"
+                            "本次跳过接口试答，后续对话将直接使用本地模型。"
+                        ),
+                        provider_base_url=self.provider_base_url,
+                    )
                 result = LocalModelInstallResult(
                     ok=False,
                     preset=preset,

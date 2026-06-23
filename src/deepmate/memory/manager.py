@@ -278,6 +278,10 @@ def _apply_memory_patch_unlocked(
     if project_path != profile_path:
         documents["project_memory"] = _read_document(project_path / LONG_TERM_MEMORY_FILE)
     lines = {target: list(document.bullets) for target, document in documents.items()}
+    normalized_existing = {
+        target: {_normalized_bullet_key(line) for line in target_lines}
+        for target, target_lines in lines.items()
+    }
     applied: list[MemoryPatchOperation] = []
     skipped: list[str] = []
     patch_writes: set[tuple[str, str]] = set()
@@ -301,8 +305,13 @@ def _apply_memory_patch_unlocked(
             if write_key in patch_writes:
                 skipped.append("duplicate_content")
                 continue
+            normalized_key = _normalized_bullet_key(operation.content)
+            if normalized_key in normalized_existing[operation.target]:
+                skipped.append("duplicate_existing_content")
+                continue
             patch_writes.add(write_key)
             target_lines.append(operation.content)
+            normalized_existing[operation.target].add(normalized_key)
             applied.append(operation)
             continue
         if operation.action == PATCH_REPLACE:
@@ -311,6 +320,9 @@ def _apply_memory_patch_unlocked(
                 skipped.append("replace_ref_not_found")
                 continue
             target_lines[index] = operation.content
+            normalized_existing[operation.target] = {
+                _normalized_bullet_key(line) for line in target_lines
+            }
             applied.append(operation)
             continue
         if operation.action == PATCH_REMOVE:
@@ -319,6 +331,9 @@ def _apply_memory_patch_unlocked(
                 skipped.append("remove_ref_not_found")
                 continue
             del target_lines[index]
+            normalized_existing[operation.target] = {
+                _normalized_bullet_key(line) for line in target_lines
+            }
             applied.append(operation)
 
     if not applied:
@@ -340,7 +355,7 @@ def _apply_memory_patch_unlocked(
             continue
         if document.path in written_paths:
             continue
-        updated = tuple(lines[target])
+        updated = _deduplicated_bullets(tuple(lines[target]))
         if updated != document.bullets:
             _write_document(document.path, document, updated)
         written_paths.add(document.path)
@@ -440,6 +455,23 @@ def _clean_bullet(content: str) -> str:
     if line.startswith("- "):
         line = line[2:].strip()
     return line
+
+
+def _deduplicated_bullets(bullets: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for bullet in bullets:
+        key = _normalized_bullet_key(bullet)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        output.append(bullet)
+    return tuple(output)
+
+
+def _normalized_bullet_key(content: str) -> str:
+    line = _clean_bullet(content).casefold()
+    return "".join(char for char in line if char.isalnum())
 
 
 def _exact_bullet_index(lines: list[str], value: str) -> int | None:

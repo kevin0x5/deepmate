@@ -33,6 +33,7 @@ class LocalRuntimeTests(unittest.TestCase):
                 ),
             ),
             patch.object(runtime, "has_model", return_value=True),
+            patch.object(runtime, "has_runtime_model", return_value=False),
             patch.object(
                 runtime,
                 "health_check",
@@ -184,6 +185,7 @@ class LocalRuntimeTests(unittest.TestCase):
                 ),
             ),
             patch.object(runtime, "has_model", return_value=True),
+            patch.object(runtime, "has_runtime_model", return_value=False),
             patch.object(
                 runtime,
                 "health_check",
@@ -200,6 +202,40 @@ class LocalRuntimeTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(any(item.stage == "checking" for item in progress))
         self.assertTrue(any(item.stage == "verifying" for item in progress))
+        start_server.assert_called_once()
+
+    def test_prepare_model_allows_installed_model_when_health_check_is_inconclusive(self) -> None:
+        preset = local_model_by_id("qwen3-local")
+        self.assertIsNotNone(preset)
+        runtime = OllamaLocalRuntime()
+
+        with (
+            patch.object(
+                runtime,
+                "ensure_ready",
+                return_value=LocalModelStatus(
+                    available=True,
+                    installed=True,
+                    running=True,
+                ),
+            ),
+            patch.object(runtime, "has_model", return_value=True),
+            patch.object(runtime, "has_runtime_model", return_value=True),
+            patch.object(
+                runtime,
+                "health_check",
+                return_value=LocalModelInstallResult(
+                    ok=False,
+                    preset=preset,
+                    message="failed",
+                ),
+            ),
+            patch.object(runtime, "_start_server") as start_server,
+        ):
+            result = runtime.prepare_model(preset)
+
+        self.assertTrue(result.ok)
+        self.assertIn("Ollama", result.message)
         start_server.assert_called_once()
 
     def test_pull_timeout_kills_and_waits_for_process(self) -> None:

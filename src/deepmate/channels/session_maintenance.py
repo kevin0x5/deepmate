@@ -17,7 +17,11 @@ from deepmate.memory import (
     record_curator_pending_checkpoint,
     should_skip_memory_extraction,
 )
-from deepmate.memory.manager import MemoryPatch, apply_memory_patch
+from deepmate.memory.manager import (
+    MemoryPatch,
+    MemoryPatchOperation,
+    apply_memory_patch,
+)
 from deepmate.providers import (
     ChatCompletionsProvider,
     ModelConversationItem,
@@ -975,11 +979,38 @@ def _apply_memory_patch_after_checkpoint(
             refs=("reason=no_memory_patch_operations",),
         )
 
+    filtered_patch, unsupported_count = _filter_checkpoint_memory_patch(
+        memory_patch,
+        source_text,
+    )
+    if not filtered_patch.operations:
+        trace_recorder.record(
+            TraceEvent(
+                kind="memory_patch_skipped",
+                summary="Checkpoint memory patch skipped because proposed operations were not supported by user-authored source.",
+                refs=(
+                    "reason=unsupported_by_user_source",
+                    f"unsupported={unsupported_count}",
+                    f"summary_id={summary_record.summary_id}",
+                    *runtime.activation.trace_refs(),
+                ),
+            )
+        )
+        return MemoryCheckpointHookResult(
+            status="skipped",
+            operation_count=len(memory_patch.operations),
+            skipped_count=unsupported_count,
+            refs=(
+                "reason=unsupported_by_user_source",
+                f"unsupported={unsupported_count}",
+            ),
+        )
+
     hot_profile_budget = runtime.activation.context_snapshot.hot_profile_token_budget
     try:
         apply_result = apply_memory_patch(
             settings.global_profile_dir(session.profile.name),
-            memory_patch,
+            filtered_patch,
             hot_profile_token_budget=hot_profile_budget,
             project_profile_dir=settings.project_profile_dir(session.profile.name),
         )
@@ -1013,11 +1044,12 @@ def _apply_memory_patch_after_checkpoint(
             status="pending",
             operation_count=len(memory_patch.operations),
             applied_count=len(apply_result.applied_operations),
-            skipped_count=len(apply_result.skipped),
+            skipped_count=len(apply_result.skipped) + unsupported_count,
             budget_blocked_count=len(apply_result.budget_blocked),
             refs=(
                 "reason=budget_blocked",
                 *apply_result.summary_refs(),
+                f"unsupported={unsupported_count}",
             ),
         )
 
@@ -1025,9 +1057,12 @@ def _apply_memory_patch_after_checkpoint(
         status="applied" if apply_result.changed() else "skipped",
         operation_count=len(memory_patch.operations),
         applied_count=len(apply_result.applied_operations),
-        skipped_count=len(apply_result.skipped),
+        skipped_count=len(apply_result.skipped) + unsupported_count,
         budget_blocked_count=len(apply_result.budget_blocked),
-        refs=apply_result.summary_refs(),
+        refs=(
+            *apply_result.summary_refs(),
+            f"unsupported={unsupported_count}",
+        ),
     )
     trace_recorder.record(
         TraceEvent(
@@ -1037,6 +1072,7 @@ def _apply_memory_patch_after_checkpoint(
                 "trigger=session_summary_checkpoint",
                 f"summary_id={summary_record.summary_id}",
                 *apply_result.summary_refs(),
+                f"unsupported={unsupported_count}",
                 *runtime.activation.trace_refs(),
             ),
         )
@@ -1060,6 +1096,106 @@ def _apply_memory_patch_after_checkpoint(
         refs=(f"summary_id={summary_record.summary_id}", *result.refs),
     )
     return result
+
+
+def _filter_checkpoint_memory_patch(
+    memory_patch: MemoryPatch,
+    user_source_text: str,
+) -> tuple[MemoryPatch, int]:
+    """Keep checkpoint memory writes grounded in user-authored source."""
+    supported_operations = []
+    unsupported_count = 0
+    for operation in memory_patch.normalized().operations:
+        if _checkpoint_memory_operation_supported(operation, user_source_text):
+            supported_operations.append(operation)
+        else:
+            unsupported_count += 1
+    return MemoryPatch(operations=tuple(supported_operations)), unsupported_count
+
+
+def _checkpoint_memory_operation_supported(
+    operation: MemoryPatchOperation,
+    user_source_text: str,
+) -> bool:
+    action = operation.action.strip().lower()
+    if action in {"skip", "demote_to_warm"}:
+        return True
+    source_key = _memory_alignment_key(user_source_text)
+    if action in {"write_user", "write_memory", "write_project_memory"}:
+        return _memory_content_supported(operation.content, source_key)
+    if action == "replace":
+        return _memory_content_supported(operation.content, source_key)
+    if action == "remove":
+        return _memory_content_supported(operation.replace_ref, source_key)
+    return True
+
+
+def _memory_content_supported(candidate: str, source_key: str) -> bool:
+    return any(
+        _memory_text_supported(candidate_key, source_key)
+        for candidate_key in _memory_alignment_candidate_keys(candidate)
+    )
+
+
+def _memory_text_supported(candidate_key: str, source_key: str) -> bool:
+    if not candidate_key:
+        return False
+    if candidate_key in source_key:
+        return True
+    if len(candidate_key) <= 6:
+        return False
+    candidate_units = _memory_alignment_units(candidate_key)
+    if not candidate_units:
+        return False
+    source_units = _memory_alignment_units(source_key)
+    if not source_units:
+        return False
+    overlap = len(candidate_units & source_units)
+    unit_ratio = overlap / len(candidate_units)
+    candidate_chars = set(candidate_key)
+    char_ratio = len(candidate_chars & set(source_key)) / len(candidate_chars)
+    return char_ratio >= 0.95 and unit_ratio >= 0.85
+
+
+def _memory_alignment_key(text: str) -> str:
+    return "".join(char.casefold() for char in str(text) if char.isalnum())
+
+
+def _memory_alignment_candidate_keys(text: str) -> tuple[str, ...]:
+    key = _memory_alignment_key(text)
+    variants = [key]
+    for prefix in (
+        "用户偏好",
+        "用户希望",
+        "用户要求",
+        "用户需要",
+        "用户通常",
+        "用户倾向于",
+        "用户喜欢",
+        "用户是",
+        "本项目",
+        "项目",
+        "theuserprefers",
+        "userprefers",
+        "theuserwants",
+        "userwants",
+        "theuserneeds",
+        "userneeds",
+        "thisproject",
+        "project",
+    ):
+        if key.startswith(prefix) and len(key) > len(prefix):
+            variants.append(key[len(prefix) :])
+    return tuple(dict.fromkeys(variant for variant in variants if variant))
+
+
+def _memory_alignment_units(key: str) -> set[str]:
+    if not key:
+        return set()
+    units = {key[index : index + 2] for index in range(max(0, len(key) - 1))}
+    if len(key) <= 6:
+        units.update(key)
+    return units
 
 
 def _record_memory_pending_after_checkpoint(

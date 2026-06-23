@@ -7,6 +7,7 @@ from deepmate.capabilities.maintenance import (
     run_daily_capability_maintenance,
 )
 from deepmate.capabilities.surface import (
+    CAPABILITY_RENDER_KIND_ORDER,
     CapabilitySurface,
     combine_surfaces,
     from_mcp_tool_catalog,
@@ -30,6 +31,7 @@ __all__ = [
     "CapabilityMaintenanceProposal",
     "CapabilityMaintenanceResult",
     "CapabilityProposalStore",
+    "CAPABILITY_RENDER_KIND_ORDER",
     "CapabilityScope",
     "CapabilitySource",
     "CapabilitySurface",

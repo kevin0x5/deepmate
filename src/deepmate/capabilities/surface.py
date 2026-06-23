@@ -11,6 +11,13 @@ from deepmate.mcp import McpToolCatalog, McpToolRef
 from deepmate.skills import SkillCard
 from deepmate.capabilities.state import CapabilityState, CapabilityTemperature
 
+CAPABILITY_RENDER_KIND_ORDER = (
+    CapabilityKind.SKILL,
+    CapabilityKind.NATIVE_TOOL,
+    CapabilityKind.MCP_SERVER,
+    CapabilityKind.MCP_TOOL,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class CapabilitySurface:
@@ -32,6 +39,17 @@ class CapabilitySurface:
     def surface_keys(self) -> tuple[str, ...]:
         """Return stable keys for visible capabilities (sorted for deterministic caching)."""
         return tuple(sorted(ref.surface_key() for ref in self.refs))
+
+    def render_order_keys(self) -> tuple[str, ...]:
+        """Return stable keys in the same order used by system-context rendering."""
+        ordered: list[str] = []
+        for kind in CAPABILITY_RENDER_KIND_ORDER:
+            ordered.extend(
+                ref.surface_key()
+                for ref in self.refs
+                if ref.kind == kind
+            )
+        return tuple(ordered)
 
 
 def from_skill_cards(

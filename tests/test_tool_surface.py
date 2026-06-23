@@ -101,6 +101,13 @@ class ToolSurfaceTests(unittest.TestCase):
                 "native_tool:read_text_file:Read a text file.",
             ),
         )
+        self.assertEqual(
+            surface.render_order_keys(),
+            (
+                "native_tool:read_text_file:Read a text file.",
+                "mcp_tool:filesystem.stat_file:MCP tool filesystem.stat_file.",
+            ),
+        )
 
     def test_skill_temperature_filters_surface(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

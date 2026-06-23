@@ -90,19 +90,38 @@ deepmate --doctor
 只有在切换模型服务、调整上下文预算，或覆盖摘要/记忆等内部模型时，才需要编辑
 `config/deepmate.yaml` 或 `config/providers.yaml`。
 
-运行时覆盖：
+需要时可以在 CLI 单次运行中覆盖模型选项：
 
 ```bash
 deepmate --model deepseek-v4-pro --thinking enabled --reasoning-effort max "审查这个设计。"
 ```
 
-本地模型：
+日常使用通常直接进入 TUI：
 
 ```bash
-deepmate          # 启动后输入 /local 准备并切换到 Ollama
+deepmate
 ```
 
-## 常用命令
+常用 TUI 命令：
+
+```text
+/local                         准备并切换到 Ollama 本地模型。
+/task plan <目标>              创建或更新 task/plan.md。
+/task execute                  按当前 Task Mode 计划执行。
+/task checkpoint <说明>        将阶段成果保存到 task/achievements/。
+/qa <目标>                     创建 QA Audit 方案。
+/qa run                        执行已批准的 QA 检查。
+/cron add <计划和任务>         创建工作区定时任务草稿。
+/deploy ./dist                 打开本地/局域网/外部预览。
+/pet setup                     安装或修复桌面宠物运行时。
+/pet on                        启动桌面宠物窗口。
+/session tree                  查看会话分支关系。
+/approvals                     查看当前会话的审批历史。
+```
+
+## CLI 参考
+
+TUI 是默认入口。下面这些 CLI 命令适合脚本、检查或单轮任务：
 
 ```bash
 # 只读项目检查
@@ -114,7 +133,7 @@ deepmate --workspace-write "优化 README 的表达。"
 # Shell（沙箱执行，默认关闭）
 deepmate --shell "运行 TUI 相关的聚焦测试。"
 
-# Task Mode
+# Task Mode CLI 用法
 deepmate --task plan "规划认证模块的下一步修改。"
 deepmate --task execute "执行已确认方案。"
 deepmate --task checkpoint "把当前阶段归档为阶段成果。"
@@ -145,10 +164,10 @@ deepmate --trust-workspace
 deepmate --remote wecom
 
 # 桌面宠物
+deepmate --pet-status
 deepmate --pet
 
-# 部署预览
-# 在 `deepmate` 中使用：/deploy ./dist
+# 部署预览通常在 TUI 中启动：/deploy ./dist
 
 # 可观测性
 deepmate --show-session <session-id> --trace-events 50

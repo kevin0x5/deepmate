@@ -2507,7 +2507,7 @@ class TuiChannelTests(unittest.TestCase):
             self.assertEqual(messages[-1].kind, "permissions")
             self.assertEqual(messages[-1].title, "permissions")
             self.assertEqual(messages[-1].status, "")
-            self.assertIn("Denied: Second approval", messages[-1].body)
+            self.assertEqual(messages[-1].body, "Denied: Second approval")
 
     def test_tui_approval_results_are_grouped_by_permission(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2545,14 +2545,55 @@ class TuiChannelTests(unittest.TestCase):
             ]
             self.assertEqual(len(permission_messages), 1)
             self.assertEqual(permission_messages[0].status, "")
-            body = permission_messages[0].body
-            self.assertIn("Allowed (session): shell execution", body)
+            self.assertEqual(
+                permission_messages[0].body,
+                "Allowed (session): shell network access",
+            )
+            history = "\n".join(
+                app._approval_result_lines_by_session[app.state.session.session_id]
+            )
+            self.assertIn("Allowed (session): shell execution", history)
             self.assertIn(
                 "Allowed (session): shell command `python3 -m pip install skillhub`",
-                body,
+                history,
             )
-            self.assertIn("Allowed (session): shell network access", body)
-            self.assertNotIn("Deepmate will continue automatically", body)
+            self.assertIn("Allowed (session): shell network access", history)
+
+    def test_tui_tool_shell_approval_is_reused_by_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = _workspace(Path(tmp))
+            app = DeepmateTuiApp(_state(workspace))
+            approvals = []
+            app._request_approval = lambda *args, **kwargs: approvals.append(args) or "session"
+            tool = NativeTool(
+                name="run_shell_command",
+                description="Run shell command",
+                input_schema={},
+                handler=lambda _args: NativeToolResult(content="ok"),
+                read_only=False,
+                requires_shell=True,
+            )
+            first = ToolAccessDecision(
+                allowed=False,
+                reason="Native tool requires shell access.",
+                requires_approval=True,
+                refs=("tool=run_shell_command", "command=curl https://example.test/a"),
+            )
+            second = ToolAccessDecision(
+                allowed=False,
+                reason="Native tool requires shell access.",
+                requires_approval=True,
+                refs=("tool=run_shell_command", "command=curl https://example.test/b"),
+            )
+
+            self.assertTrue(app._tool_approval(tool, first))
+            self.assertTrue(app._tool_approval(tool, second))
+
+            self.assertEqual(len(approvals), 1)
+            self.assertIn(
+                "capability:tool-shell",
+                app._tool_session_approvals_for_session(app.state.session.session_id),
+            )
 
     def test_tui_deny_pending_approval_releases_queued_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2573,6 +2614,25 @@ class TuiChannelTests(unittest.TestCase):
             self.assertTrue(first.event.is_set())
             self.assertTrue(second.event.is_set())
             self.assertEqual(app._last_queue_pause_reason, "approval denied")
+
+    def test_tui_approvals_command_opens_history_tab(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = _workspace(Path(tmp))
+            app = DeepmateTuiApp(_state(workspace))
+            written = []
+            app._write = written.append
+            app._render_active_tab = lambda: None
+            app._refresh_content_tabs = lambda: None
+            app._approval_result_lines_by_session[app.state.session.session_id] = [
+                "Allowed (session): shell execution",
+                "Denied: browser control",
+            ]
+
+            app._show_approval_history()
+
+            self.assertEqual(app._active_tab, "approvals")
+            self.assertIn("Allowed (session): shell execution", app._open_tabs["approvals"].content)
+            self.assertEqual(written[-1].title, "/approvals")
 
     def test_tui_approval_body_includes_action_refs(self) -> None:
         body = _approval_body(
@@ -2712,7 +2772,7 @@ class TuiChannelTests(unittest.TestCase):
             self.assertEqual(messages[-1].kind, "permissions")
             self.assertEqual(messages[-1].title, "permissions")
             self.assertEqual(messages[-1].status, "")
-            self.assertIn("Allowed (once): Tool approval", messages[-1].body)
+            self.assertEqual(messages[-1].body, "Allowed (once): Tool approval")
 
     def test_tui_approval_ignores_free_chat_while_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3695,7 +3755,7 @@ class TuiChannelTests(unittest.TestCase):
             self.assertIn("/close-tab - Close the current content tab", result.messages[0].preview)
             self.assertNotIn("/help", result.messages[0].preview)
             self.assertNotIn("/?", result.messages[0].preview)
-            self.assertIn("task/plan", result.messages[0].preview)
+            self.assertIn("/task plan", result.messages[0].preview)
 
     def test_tui_pet_commands_update_profile_and_request_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3720,6 +3780,44 @@ class TuiChannelTests(unittest.TestCase):
             self.assertIn("no external learning sources", learning.messages[0].body)
             self.assertIn("pet_start_requested=true", started.messages[0].refs)
             self.assertIn("Desktop pet", status.messages[0].preview)
+
+    def test_tui_pet_setup_command_requests_runtime_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = _workspace(Path(tmp))
+            state = _state(workspace, data_dir=workspace / "var")
+            state.pet_state_store = PetStateStore.in_data_dir(workspace / "var")
+
+            class NotReady:
+                ready = False
+                ui_dir = workspace / "var" / "pet" / "ui_runtime"
+                message = "Electron runtime is not installed."
+
+            with patch("deepmate.channels.tui.commands.pet_setup_status", return_value=NotReady()):
+                result = handle_tui_command("/pet setup", state)
+
+            self.assertTrue(result.handled)
+            self.assertIn("pet_setup_requested=true", result.messages[0].refs)
+            self.assertIn("Runtime directory", result.messages[0].preview)
+
+    def test_tui_pet_setup_uses_session_approval_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = _workspace(Path(tmp))
+            state = _state(workspace, data_dir=workspace / "var")
+            state.pet_state_store = PetStateStore.in_data_dir(workspace / "var")
+            state.approval_cache = SessionApprovalCache()
+            app = DeepmateTuiApp(state)
+            approvals = []
+            started = []
+            app._request_approval = lambda *args, **kwargs: approvals.append(args) or "session"
+            app._start_pet_setup = started.append
+            messages = (TuiMessage(kind="status", title="desktop pet", body="", refs=("pet_setup_requested=true",)),)
+
+            app._handle_pet_setup_request(messages)
+            app._handle_pet_setup_request(messages)
+
+            self.assertEqual(len(approvals), 1)
+            self.assertEqual(started, [workspace / "var", workspace / "var"])
+            self.assertTrue(state.approval_cache.is_allowed("capability:pet-runtime-setup"))
 
     def test_tui_command_palette_filters_and_completes_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3789,6 +3887,36 @@ class TuiChannelTests(unittest.TestCase):
             self.assertTrue(event.stopped)
             self.assertEqual(app._command_hint_index, 1)
             self.assertEqual(renders, [1])
+
+    def test_tui_command_palette_arrow_keys_precede_prompt_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = _workspace(Path(tmp))
+            app = DeepmateTuiApp(_state(workspace))
+            app._command_hint_matches = (("/model", "choose model"), ("/mcp", "list mcp"))
+            app._command_hint_index = 0
+            history_called = []
+            app._handle_prompt_history_key = lambda key: history_called.append(key) or True
+            app._render_command_hints = lambda: None
+
+            class Event:
+                key = "down"
+                stopped = False
+                prevented = False
+
+                def prevent_default(self) -> None:
+                    self.prevented = True
+
+                def stop(self) -> None:
+                    self.stopped = True
+
+            event = Event()
+
+            app.on_key(event)
+
+            self.assertTrue(event.prevented)
+            self.assertTrue(event.stopped)
+            self.assertEqual(app._command_hint_index, 1)
+            self.assertEqual(history_called, [])
 
     def test_tui_command_palette_enter_does_not_swallow_exact_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

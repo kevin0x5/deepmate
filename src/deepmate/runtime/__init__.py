@@ -23,7 +23,9 @@ from deepmate.runtime.checkpoint_update import (
     ActivityDigest,
     CheckpointUpdate,
     build_checkpoint_update_request,
+    build_memory_patch_request,
     generate_checkpoint_update,
+    parse_memory_patch_response,
     parse_checkpoint_update_response,
 )
 from deepmate.runtime.delivery_review import (
@@ -227,6 +229,7 @@ __all__ = [
     "TurnFollowupMessage",
     "build_conversation_budget_report",
     "build_checkpoint_update_request",
+    "build_memory_patch_request",
     "build_request_budget_report",
     "build_turn_cost_cache_summary",
     "build_model_request",
@@ -247,6 +250,7 @@ __all__ = [
     "load_hook_report",
     "model_request_prefix_fingerprint",
     "parse_checkpoint_update_response",
+    "parse_memory_patch_response",
     "refresh_runtime_activation_context",
     "review_final_response",
     "run_agent_step",

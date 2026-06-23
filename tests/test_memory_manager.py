@@ -68,7 +68,7 @@ class MemoryManagerTests(unittest.TestCase):
             self.assertIn("- 用户偏好中文直接回答。", content)
             self.assertNotIn("- 用户偏好中文。\n", content)
 
-    def test_apply_patch_does_not_deduplicate_or_merge_semantically(self) -> None:
+    def test_apply_patch_skips_existing_duplicate_content(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             profile_dir = Path(temp_dir)
             (profile_dir / "memory.md").write_text(
@@ -88,9 +88,37 @@ class MemoryManagerTests(unittest.TestCase):
                 ),
             )
 
-            self.assertTrue(result.changed())
+            self.assertFalse(result.changed())
+            self.assertIn("duplicate_existing_content", result.skipped)
             content = (profile_dir / "memory.md").read_text(encoding="utf-8")
-            self.assertEqual(content.count("- 保持回答克制。"), 2)
+            self.assertEqual(content.count("- 保持回答克制。"), 1)
+
+    def test_apply_patch_deduplicates_normalized_existing_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_dir = Path(temp_dir)
+            (profile_dir / "memory.md").write_text(
+                "- 保持回答克制。\n",
+                encoding="utf-8",
+            )
+
+            result = apply_memory_patch(
+                profile_dir,
+                MemoryPatch(
+                    operations=(
+                        MemoryPatchOperation(
+                            action="write_memory",
+                            content="保持 回答 克制",
+                        ),
+                    )
+                ),
+            )
+
+            self.assertFalse(result.changed())
+            self.assertIn("duplicate_existing_content", result.skipped)
+            self.assertEqual(
+                (profile_dir / "memory.md").read_text(encoding="utf-8"),
+                "- 保持回答克制。\n",
+            )
 
     def test_budget_blocked_patch_is_not_written(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

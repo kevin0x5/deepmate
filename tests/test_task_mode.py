@@ -768,6 +768,18 @@ class TaskModeTests(unittest.TestCase):
             self.assertFalse((workspace / ".deepmate" / "task_mode.json").exists())
             self.assertTrue((workspace / "task" / "plan.md").exists())
 
+    def test_task_slash_aliases_parse_like_task_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = _workspace(Path(tmp))
+            controller = TaskSessionController(workspace)
+
+            plan = controller.prepare_prompt("/task --plan Discuss the release.")
+
+            self.assertIsNotNone(plan)
+            self.assertEqual(plan.stage, TaskStage.PLAN)
+            self.assertEqual(plan.prompt, "Discuss the release.")
+            self.assertTrue((workspace / "task" / "plan.md").exists())
+
     def test_cli_task_status_does_not_create_task_documents(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = _workspace(Path(tmp))

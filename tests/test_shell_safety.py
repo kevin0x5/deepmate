@@ -136,7 +136,7 @@ class ShellSafetyTests(unittest.TestCase):
     def test_medium_shell_command_runs_after_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache = SessionApprovalCache()
-            cache.allow_for_session("shell:off:python3 -c 'print(\"custom")
+            cache.allow_for_session("capability:shell-medium")
             registry = NativeToolRegistry(
                 shell_tools(
                     Path(tmp),
@@ -478,6 +478,32 @@ class ShellSafetyTests(unittest.TestCase):
         self.assertTrue(second.allowed)
         self.assertEqual(requests, ["capability:shell"])
 
+    def test_shell_network_allow_once_covers_rest_of_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = SessionApprovalCache()
+            policy = ToolSafetyPolicy(
+                workspace=Path(tmp),
+                shell_enabled=True,
+                network_enabled=False,
+                approval_cache=cache,
+            )
+
+            first = policy.check_shell_command("curl https://example.test/a", network="on")
+            self.assertFalse(first.allowed)
+            self.assertEqual(first.approval_key, "capability:shell-network")
+            cache.allow_once(first.approval_key)
+
+            second = policy.check_shell_command("curl https://example.test/b", network="on")
+            cache.reset_turn()
+            after_reset = policy.check_shell_command(
+                "curl https://example.test/c",
+                network="on",
+            )
+
+        self.assertTrue(second.allowed)
+        self.assertFalse(after_reset.allowed)
+        self.assertEqual(after_reset.approval_key, "capability:shell-network")
+
     def test_scoped_approval_callback_is_thread_local(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache = SessionApprovalCache()
@@ -608,7 +634,7 @@ class ShellSafetyTests(unittest.TestCase):
             runner = SandboxRunner()
             runner.backend = lambda policy: "permission-only"
             cache = SessionApprovalCache()
-            cache.allow_for_session("shell:on:pwd")
+            cache.allow_for_session("capability:shell-network")
             registry = NativeToolRegistry(
                 shell_tools(
                     workspace,
@@ -669,6 +695,11 @@ class ShellSafetyTests(unittest.TestCase):
             )
 
         self.assertEqual(pwd_result.backend, "sandbox-exec")
+        if (
+            pwd_result.exit_code == 71
+            and "Operation not permitted" in pwd_result.stderr
+        ):
+            self.skipTest("sandbox-exec is blocked by the current host sandbox")
         self.assertEqual(pwd_result.exit_code, 0)
         self.assertIn(str(workspace.resolve()), pwd_result.stdout)
 

@@ -219,7 +219,10 @@ class ToolSafetyPolicy:
         if network_mode == "on" and not self.network_enabled:
             if (
                 self.approval_cache is not None
-                and self.approval_cache.is_allowed("capability:shell-network")
+                and (
+                    self.approval_cache.is_allowed("capability:shell-network")
+                    or self.approval_cache.consume_once("capability:shell-network")
+                )
             ):
                 pass
             else:
@@ -486,8 +489,13 @@ def _is_env_change_command(command: str) -> bool:
 def _approval_key(command: str, risk: SafetyRiskLevel, network_mode: str) -> str:
     if risk == SafetyRiskLevel.LOW:
         return ""
-    prefix = _command_prefix(command)
-    return f"shell:{network_mode}:{prefix}"
+    if _is_env_change_command(command):
+        return "capability:env_change"
+    if network_mode == "on":
+        return "capability:shell-network"
+    if risk == SafetyRiskLevel.HIGH:
+        return "capability:shell-high"
+    return "capability:shell-medium"
 
 
 def _approval_reason(risk: SafetyRiskLevel, network_mode: str) -> str:

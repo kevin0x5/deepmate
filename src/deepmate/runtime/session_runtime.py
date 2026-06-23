@@ -248,11 +248,7 @@ class SessionRuntime:
         skill_docs = tuple(selected_skill_documents)
         schema_docs = tuple(tool_schemas)
         current_epoch = runtime.activation.context_epoch
-        current_capability_tag = (
-            capability_surface.surface_keys()
-            if capability_surface is not None and not capability_surface.is_empty()
-            else ()
-        )
+        current_capability_tag = _capability_cache_tag(capability_surface)
         current_skill_tag = tuple(_skill_cache_tag(skill) for skill in skill_docs)
 
         if (
@@ -504,6 +500,12 @@ def _skill_cache_tag(skill: "SkillDocument") -> str:
     body = "\n".join((skill.description.strip(), skill.body.strip()))
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
     return f"{skill.name.strip()}:{digest}"
+
+
+def _capability_cache_tag(capability_surface: "CapabilitySurface | None") -> tuple[str, ...]:
+    if capability_surface is None or capability_surface.is_empty():
+        return ()
+    return capability_surface.render_order_keys()
 
 
 def _schema_names(schemas: Iterable[Mapping[str, object]]) -> tuple[str, ...]:

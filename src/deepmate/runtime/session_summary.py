@@ -31,6 +31,8 @@ DEFAULT_TOOL_OUTPUT_HIGH_RATIO = 0.50
 DEFAULT_SUMMARY_TARGET_TOKENS = 4_000
 DEFAULT_LONG_SOURCE_TOKENS = 64_000
 DEFAULT_MIN_LONG_SOURCE_SUMMARY_TOKENS = 256
+SUMMARY_TOOL_CONTENT_PREVIEW_CHARS = 600
+SUMMARY_TOOL_DATA_PREVIEW_CHARS = 300
 
 SUMMARY_SYSTEM_PROMPT = """You compact an earlier part of one Deepmate session.
 
@@ -43,6 +45,8 @@ Preserve information needed for the next turns:
 - important decisions and assumptions
 - files, tools, commands, artifacts, and evidence refs
 - errors, blockers, unfinished checks, and open questions
+- verified facts and checks separately from unverified assumptions
+- concrete next actions needed to continue the work
 - recent continuation notes needed to continue work
 
 Do not preserve:
@@ -578,7 +582,9 @@ def _summary_user_prompt(summary_input: SessionSummaryInput) -> str:
         "### Decisions And Constraints",
         "### Files, Tools, And Artifacts",
         "### Evidence And References",
+        "### Verified And Unverified State",
         "### Open Questions Or Blockers",
+        "### Next Actions",
         "### Recent Continuation Notes",
     ]
     if summary_input.previous_summary.strip():
@@ -639,8 +645,11 @@ def _render_tool_exchange(sequence: int, exchange: ModelToolExchange) -> str:
         result_text = _text(getattr(result, "content", ""))
         data = getattr(result, "data", {}) or {}
         refs = _iter_values(getattr(result, "refs", ()))
+        result_preview = _compact_tool_result_text(result_text)
         if not result_text and data:
-            result_text = str(dict(data))
+            result_preview = _compact_tool_data_preview(data)
+        if not result_preview and data:
+            result_preview = _compact_tool_data_preview(data)
         lines.extend(
             (
                 "",
@@ -648,11 +657,35 @@ def _render_tool_exchange(sequence: int, exchange: ModelToolExchange) -> str:
                 f"request_id: {_text(getattr(result, 'request_id', ''))}",
                 f"is_error: {str(bool(getattr(result, 'is_error', False))).lower()}",
                 f"refs: {', '.join(str(ref).strip() for ref in refs if str(ref).strip()) or '-'}",
-                "content:",
-                result_text or "(empty)",
+                "content_summary:",
+                result_preview or "(empty)",
             )
         )
     return "\n".join(lines)
+
+
+def _compact_tool_result_text(text: str) -> str:
+    clean = " ".join(text.split()).strip()
+    if not clean:
+        return ""
+    if len(clean) <= SUMMARY_TOOL_CONTENT_PREVIEW_CHARS:
+        return clean
+    return (
+        clean[:SUMMARY_TOOL_CONTENT_PREVIEW_CHARS].rstrip()
+        + f"... [truncated {len(clean) - SUMMARY_TOOL_CONTENT_PREVIEW_CHARS} chars]"
+    )
+
+
+def _compact_tool_data_preview(data: object) -> str:
+    if not isinstance(data, dict) or not data:
+        return ""
+    preview = " ".join(str(dict(data)).split()).strip()
+    if len(preview) <= SUMMARY_TOOL_DATA_PREVIEW_CHARS:
+        return preview
+    return (
+        preview[:SUMMARY_TOOL_DATA_PREVIEW_CHARS].rstrip()
+        + f"... [truncated {len(preview) - SUMMARY_TOOL_DATA_PREVIEW_CHARS} chars]"
+    )
 
 
 def _text(value: object) -> str:

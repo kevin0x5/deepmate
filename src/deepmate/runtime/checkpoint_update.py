@@ -32,18 +32,6 @@ Output schema:
   "session_summary": {
     "content": "Markdown summary for continuing the same session"
   },
-  "memory_patch": {
-    "operations": [
-      {
-        "action": "write_user|write_memory|write_project_memory|replace|remove|demote_to_warm|skip",
-        "target": "user|memory|project_memory",
-        "content": "...",
-        "replace_ref": "...",
-        "reason": "...",
-        "confidence": 0.0
-      }
-    ]
-  },
   "activity_digest": {
     "summary": "Short human-readable daily note summary",
     "highlights": ["..."],
@@ -55,12 +43,39 @@ Session summary rules:
 - Preserve the user's current goal, explicit constraints, scoped product/project
   context, decisions, rejected alternatives, files, tools, evidence refs,
   blockers, and continuation notes.
+- Distinguish verified facts/checks from unverified assumptions.
+- Preserve concrete next actions needed to continue work.
 - Keep product/project/task scope explicit. Do not rewrite scoped decisions as
   global profile memory.
 - Do not preserve secrets, credentials, tokens, private keys, payment data,
   full addresses, or unverified guesses as facts.
 
-Memory patch rules:
+Activity digest rules:
+- Summarize what happened for a daily activity note.
+- Include scoped project/task decisions and next steps here when they are useful
+  but not global profile memory.
+- Keep it concise; the full transcript and trace remain the source of truth.
+"""
+
+MEMORY_PATCH_SYSTEM_PROMPT = """You write one Deepmate hot memory patch.
+
+Return only one JSON object. Do not use markdown fences.
+
+Output schema:
+{
+  "operations": [
+    {
+      "action": "write_user|write_memory|write_project_memory|replace|remove|demote_to_warm|skip",
+      "target": "user|memory|project_memory",
+      "content": "...",
+      "replace_ref": "...",
+      "reason": "...",
+      "confidence": 0.0
+    }
+  ]
+}
+
+Rules:
 - Hot profile memory is global user.md + global memory.md + project memory.md.
   It is injected into future activations, so keep it small and stable.
 - Use write_user only for durable user profile facts or long-term interaction
@@ -73,14 +88,8 @@ Memory patch rules:
   implementation-specific context that is too narrow even for project memory.
 - Use skip for unsafe, sensitive, speculative, or low-value content.
 - Memory patch decisions must come only from user-authored source or explicit
-  corrections, not from assistant guesses or tool output.
+  corrections. The source below intentionally excludes assistant and tool output.
 - Keep memory content as one short bullet fact without a leading dash.
-
-Activity digest rules:
-- Summarize what happened for a daily activity note.
-- Include scoped project/task decisions and next steps here when they are useful
-  but not global profile memory.
-- Keep it concise; the full transcript and trace remain the source of truth.
 """
 
 
@@ -140,8 +149,6 @@ def generate_checkpoint_update(
         request = build_checkpoint_update_request(
             model=model,
             summary_input=summary_input,
-            profile_dir=profile_dir,
-            project_profile_dir=project_profile_dir,
             options=options,
         )
         response = provider.complete(request)
@@ -154,7 +161,6 @@ def generate_checkpoint_update(
         )
         if not update.is_ready():
             raise ValueError("checkpoint update is not ready")
-        return update
     except Exception:
         summary = generate_session_summary(
             provider=provider,
@@ -162,18 +168,28 @@ def generate_checkpoint_update(
             summary_input=summary_input,
             options=options,
         )
-        return CheckpointUpdate(
+        update = CheckpointUpdate(
             session_summary=summary,
-            memory_patch=MemoryPatch(),
             activity_digest=ActivityDigest(summary=summary.content),
         )
+    memory_patch = generate_memory_patch(
+        provider=provider,
+        model=model,
+        summary_input=summary_input,
+        profile_dir=profile_dir,
+        project_profile_dir=project_profile_dir,
+        options=options,
+    )
+    return CheckpointUpdate(
+        session_summary=update.session_summary,
+        memory_patch=memory_patch,
+        activity_digest=update.activity_digest,
+    )
 
 
 def build_checkpoint_update_request(
     model: str,
     summary_input: SessionSummaryInput,
-    profile_dir: str | Path,
-    project_profile_dir: str | Path | None = None,
     options: dict[str, object] | None = None,
 ) -> ModelRequest:
     """Build the provider request used for structured checkpoint updates."""
@@ -196,8 +212,6 @@ def build_checkpoint_update_request(
                     role=MessageRole.USER,
                     content=_checkpoint_update_user_prompt(
                         summary_input,
-                        profile_dir,
-                        project_profile_dir=project_profile_dir,
                     ),
                 )
             ),
@@ -211,6 +225,87 @@ def build_checkpoint_update_request(
     if not request.is_ready():
         raise ValueError("checkpoint update request is not ready")
     return request
+
+
+def generate_memory_patch(
+    provider: ModelProvider,
+    model: str,
+    summary_input: SessionSummaryInput,
+    profile_dir: str | Path,
+    project_profile_dir: str | Path | None = None,
+    options: dict[str, object] | None = None,
+) -> MemoryPatch:
+    """Generate a hot memory patch from user-authored source only."""
+    request = build_memory_patch_request(
+        model=model,
+        summary_input=summary_input,
+        profile_dir=profile_dir,
+        project_profile_dir=project_profile_dir,
+        options=options,
+    )
+    if request is None:
+        return MemoryPatch()
+    try:
+        response = provider.complete(request)
+    except Exception:
+        return MemoryPatch()
+    try:
+        return parse_memory_patch_response(response.content)
+    except Exception:
+        return MemoryPatch()
+
+
+def build_memory_patch_request(
+    model: str,
+    summary_input: SessionSummaryInput,
+    profile_dir: str | Path,
+    project_profile_dir: str | Path | None = None,
+    options: dict[str, object] | None = None,
+) -> ModelRequest | None:
+    """Build the provider request used for user-sourced memory patching."""
+    clean_model = _text(model)
+    if not clean_model:
+        raise ValueError("memory patch model is required")
+    if not summary_input.is_ready():
+        raise ValueError("memory patch input requires source items")
+    user_source = _render_user_source_items(summary_input)
+    if not user_source:
+        return None
+    profile_path = Path(profile_dir)
+    project_profile_path = (
+        Path(project_profile_dir) if project_profile_dir is not None else profile_path
+    )
+    request = ModelRequest(
+        model=clean_model,
+        conversation=(
+            ModelConversationItem.from_message(
+                Message(role=MessageRole.SYSTEM, content=MEMORY_PATCH_SYSTEM_PROMPT)
+            ),
+            ModelConversationItem.from_message(
+                Message(
+                    role=MessageRole.USER,
+                    content=_memory_patch_user_prompt(
+                        user_source=user_source,
+                        profile_path=profile_path,
+                        project_profile_path=project_profile_path,
+                    ),
+                )
+            ),
+        ),
+        options={
+            "temperature": 0,
+            "max_tokens": 1_600,
+            **dict(options or {}),
+        },
+    )
+    if not request.is_ready():
+        raise ValueError("memory patch request is not ready")
+    return request
+
+
+def parse_memory_patch_response(content: str) -> MemoryPatch:
+    """Parse a memory-patch-only model response."""
+    return _parse_memory_patch(_parse_json_object(content))
 
 
 def parse_checkpoint_update_response(
@@ -240,15 +335,13 @@ def parse_checkpoint_update_response(
         raise ValueError("checkpoint update summary is not ready")
     return CheckpointUpdate(
         session_summary=summary,
-        memory_patch=_parse_memory_patch(payload.get("memory_patch")),
+        memory_patch=MemoryPatch(),
         activity_digest=_parse_activity_digest(payload.get("activity_digest")),
     )
 
 
 def _checkpoint_update_user_prompt(
     summary_input: SessionSummaryInput,
-    profile_dir: str | Path,
-    project_profile_dir: str | Path | None = None,
 ) -> str:
     lines = [
         "Create the next checkpoint update from the source segment below.",
@@ -262,7 +355,9 @@ def _checkpoint_update_user_prompt(
         "### Decisions And Constraints",
         "### Files, Tools, And Artifacts",
         "### Evidence And References",
+        "### Verified And Unverified State",
         "### Open Questions Or Blockers",
+        "### Next Actions",
         "### Recent Continuation Notes",
     ]
     if summary_input.previous_summary.strip():
@@ -273,12 +368,25 @@ def _checkpoint_update_user_prompt(
                 summary_input.previous_summary.strip(),
             )
         )
-    profile_path = Path(profile_dir)
-    project_profile_path = (
-        Path(project_profile_dir) if project_profile_dir is not None else profile_path
-    )
     lines.extend(
         (
+            "",
+            "New source segment:",
+            _render_source_items(summary_input.source_items),
+        )
+    )
+    return "\n".join(lines).strip()
+
+
+def _memory_patch_user_prompt(
+    *,
+    user_source: str,
+    profile_path: Path,
+    project_profile_path: Path,
+) -> str:
+    return "\n".join(
+        (
+            "Create a memory patch from user-authored source only.",
             "",
             "Current global user.md bullets:",
             _bullet_block(profile_path / "user.md"),
@@ -289,11 +397,23 @@ def _checkpoint_update_user_prompt(
             "Current project memory.md bullets:",
             _bullet_block(project_profile_path / "memory.md"),
             "",
-            "New source segment:",
-            _render_source_items(summary_input.source_items),
+            "User-authored source:",
+            user_source,
         )
-    )
-    return "\n".join(lines).strip()
+    ).strip()
+
+
+def _render_user_source_items(summary_input: SessionSummaryInput) -> str:
+    sections: list[str] = []
+    for source in summary_input.source_items:
+        item = source.item
+        if item.message is None or item.message.role != MessageRole.USER:
+            continue
+        content = item.message.content.strip()
+        if not content:
+            continue
+        sections.append(f"### User transcript item {source.sequence}\n{content}")
+    return "\n\n".join(sections).strip()
 
 
 def _parse_memory_patch(value: object) -> MemoryPatch:
