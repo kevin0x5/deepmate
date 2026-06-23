@@ -43,10 +43,24 @@ jobs:
               sys.exit(1)
           PY
 
-      - name: Run tests
-        run: PYTHONUTF8=1 LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 PYTHONPATH=src python -m unittest discover -s tests -v
+      - name: Run release checks
+        timeout-minutes: 10
+        run: |
+          export PYTHONUTF8=1
+          export LC_ALL=en_US.UTF-8
+          export LANG=en_US.UTF-8
+          export PYTHONPATH=src
+
+          python -m deepmate --help >/tmp/deepmate-help.txt
+          python -m deepmate --doctor
+          python -m unittest discover -s tests -p 'test_process_env.py' -v
+          python -m unittest discover -s tests -p 'test_chat_completions_provider.py' -v
+          python -m unittest discover -s tests -p 'test_builtin_tools.py' -v
+          python -m unittest discover -s tests -p 'test_preview_deploy.py' -v
+          python -m unittest discover -s tests -p 'test_runtime_validation.py' -v
 
       - name: Build package
+        timeout-minutes: 10
         run: python -m build
 
       - name: Check package metadata
