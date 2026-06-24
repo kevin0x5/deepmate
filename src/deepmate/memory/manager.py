@@ -19,6 +19,8 @@ PATCH_REPLACE = "replace"
 PATCH_REMOVE = "remove"
 PATCH_DEMOTE_TO_WARM = "demote_to_warm"
 PATCH_SKIP = "skip"
+MIN_DIRECT_WRITE_CONFIDENCE = 0.6
+MIN_DIRECT_REPLACE_CONFIDENCE = 0.7
 PATCH_ACTIONS = {
     PATCH_WRITE_USER,
     PATCH_WRITE_MEMORY,
@@ -292,6 +294,10 @@ def _apply_memory_patch_unlocked(
         if reason:
             skipped.append(reason)
             continue
+        confidence_reason = _operation_confidence_error(operation)
+        if confidence_reason:
+            skipped.append(confidence_reason)
+            continue
         if operation.action in {PATCH_SKIP, PATCH_DEMOTE_TO_WARM}:
             skipped.append(operation.action)
             continue
@@ -390,6 +396,24 @@ def _operation_schema_error(operation: MemoryPatchOperation) -> str:
             return "missing_replace_ref"
         if operation.action == PATCH_REPLACE and not operation.content:
             return "empty_content"
+    return ""
+
+
+def _operation_confidence_error(operation: MemoryPatchOperation) -> str:
+    confidence = operation.confidence
+    if confidence is None:
+        return ""
+    if operation.action in {
+        PATCH_WRITE_USER,
+        PATCH_WRITE_MEMORY,
+        PATCH_WRITE_PROJECT_MEMORY,
+    } and confidence < MIN_DIRECT_WRITE_CONFIDENCE:
+        return "low_confidence_write"
+    if (
+        operation.action in {PATCH_REPLACE, PATCH_REMOVE}
+        and confidence < MIN_DIRECT_REPLACE_CONFIDENCE
+    ):
+        return "low_confidence_mutation"
     return ""
 
 

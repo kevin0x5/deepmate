@@ -181,7 +181,7 @@ deepmate --validate-otlp --otlp-endpoint https://cloud.langfuse.com/api/public/o
 # Interactive session lineage
 # In `deepmate`: /session tree, /tree, /session clone, /session fork
 
-# Validate runtime without a model call
+# Validate runtime with a real provider-backed smoke test
 deepmate --validate-runtime --thinking disabled
 ```
 

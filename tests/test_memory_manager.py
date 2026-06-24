@@ -240,6 +240,27 @@ class MemoryManagerTests(unittest.TestCase):
             self.assertTrue(result.changed())
             self.assertIsNone(result.applied_operations[0].confidence)
 
+    def test_low_confidence_memory_patch_is_not_written(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_dir = Path(temp_dir)
+
+            result = apply_memory_patch(
+                profile_dir,
+                MemoryPatch(
+                    operations=(
+                        MemoryPatchOperation(
+                            action="write_user",
+                            content="用户可能偏好很长回答。",
+                            confidence=0.2,
+                        ),
+                    )
+                ),
+            )
+
+            self.assertFalse(result.changed())
+            self.assertIn("low_confidence_write", result.skipped)
+            self.assertFalse((profile_dir / "user.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

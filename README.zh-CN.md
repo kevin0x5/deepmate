@@ -177,7 +177,7 @@ deepmate --validate-otlp --otlp-endpoint https://cloud.langfuse.com/api/public/o
 # 会话树
 # 在 `deepmate` 中使用：/session tree、/tree、/session clone、/session fork
 
-# 不调用模型验证运行时配置
+# 使用真实 provider 做一次运行时冒烟验证
 deepmate --validate-runtime --thinking disabled
 ```
 

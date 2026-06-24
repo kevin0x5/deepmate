@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -33,6 +34,24 @@ DEFAULT_LONG_SOURCE_TOKENS = 64_000
 DEFAULT_MIN_LONG_SOURCE_SUMMARY_TOKENS = 256
 SUMMARY_TOOL_CONTENT_PREVIEW_CHARS = 600
 SUMMARY_TOOL_DATA_PREVIEW_CHARS = 300
+SUMMARY_TOOL_ARGUMENT_PREVIEW_CHARS = 500
+SUMMARY_TOOL_ARGUMENT_TEXT_PREVIEW_CHARS = 120
+SUMMARY_TOOL_ARGUMENT_REDACT_KEYS = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "content",
+        "html",
+        "input",
+        "markdown",
+        "new_text",
+        "old_text",
+        "password",
+        "secret",
+        "text",
+        "token",
+    }
+)
 
 SUMMARY_SYSTEM_PROMPT = """You compact an earlier part of one Deepmate session.
 
@@ -638,7 +657,7 @@ def _render_tool_exchange(sequence: int, exchange: ModelToolExchange) -> str:
                 "",
                 f"Tool request: {_text(getattr(request, 'name', ''))}",
                 f"id: {_text(getattr(request, 'id', ''))}",
-                f"arguments: {_text(getattr(request, 'raw_arguments', '')) or dict(getattr(request, 'arguments', {}) or {})}",
+                f"arguments: {_compact_tool_arguments(request)}",
             )
         )
     for result in _iter_values(exchange.tool_results):
@@ -685,6 +704,70 @@ def _compact_tool_data_preview(data: object) -> str:
     return (
         preview[:SUMMARY_TOOL_DATA_PREVIEW_CHARS].rstrip()
         + f"... [truncated {len(preview) - SUMMARY_TOOL_DATA_PREVIEW_CHARS} chars]"
+    )
+
+
+def _compact_tool_arguments(request: object) -> str:
+    arguments = getattr(request, "arguments", {}) or {}
+    if isinstance(arguments, Mapping) and arguments:
+        return _compact_argument_payload(arguments)
+    raw = _text(getattr(request, "raw_arguments", ""))
+    if raw:
+        return _compact_argument_text(raw)
+    return "{}"
+
+
+def _compact_argument_payload(arguments: Mapping[object, object]) -> str:
+    safe: dict[str, object] = {}
+    for key, value in sorted(arguments.items(), key=lambda item: str(item[0])):
+        clean_key = str(key).strip()
+        if clean_key:
+            safe[clean_key] = _compact_argument_value(clean_key, value)
+    clean = " ".join(str(safe).split()).strip()
+    if not clean:
+        return "{}"
+    if len(clean) <= SUMMARY_TOOL_ARGUMENT_PREVIEW_CHARS:
+        return clean
+    return (
+        clean[:SUMMARY_TOOL_ARGUMENT_PREVIEW_CHARS].rstrip()
+        + f"... [truncated {len(clean) - SUMMARY_TOOL_ARGUMENT_PREVIEW_CHARS} chars]"
+    )
+
+
+def _compact_argument_value(key: str, value: object) -> object:
+    clean_key = key.strip().lower()
+    if isinstance(value, str):
+        clean_value = " ".join(value.split()).strip()
+        if clean_key in SUMMARY_TOOL_ARGUMENT_REDACT_KEYS:
+            return f"<omitted {len(value)} chars>"
+        if len(clean_value) > SUMMARY_TOOL_ARGUMENT_TEXT_PREVIEW_CHARS:
+            return (
+                clean_value[:SUMMARY_TOOL_ARGUMENT_TEXT_PREVIEW_CHARS].rstrip()
+                + f"... [truncated {len(clean_value) - SUMMARY_TOOL_ARGUMENT_TEXT_PREVIEW_CHARS} chars]"
+            )
+        return clean_value
+    if isinstance(value, dict):
+        return {
+            str(child_key): _compact_argument_value(str(child_key), child_value)
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_compact_argument_value(key, child) for child in value[:8]]
+    return value
+
+
+def _compact_argument_text(text: str) -> str:
+    clean = " ".join(text.split()).strip()
+    if not clean:
+        return "{}"
+    for marker in SUMMARY_TOOL_ARGUMENT_REDACT_KEYS:
+        if f'"{marker}"' in clean or f"'{marker}'" in clean:
+            return f"<omitted raw arguments {len(text)} chars>"
+    if len(clean) <= SUMMARY_TOOL_ARGUMENT_PREVIEW_CHARS:
+        return clean
+    return (
+        clean[:SUMMARY_TOOL_ARGUMENT_PREVIEW_CHARS].rstrip()
+        + f"... [truncated {len(clean) - SUMMARY_TOOL_ARGUMENT_PREVIEW_CHARS} chars]"
     )
 
 

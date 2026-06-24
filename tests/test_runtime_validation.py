@@ -469,6 +469,42 @@ class RuntimeValidationTests(unittest.TestCase):
         self.assertIn("Desktop pet UI assets ship with Deepmate", output)
         self.assertIn("run /pet setup in the TUI", output)
 
+    def test_doctor_cli_does_not_show_pet_setup_when_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            runtime = _FakeLocalRuntime(
+                status=LocalModelStatus(
+                    available=False,
+                    installed=False,
+                    running=False,
+                    message="Ollama is not installed.",
+                )
+            )
+
+            with (
+                patch("deepmate.channels.cli._local_runtime", return_value=runtime),
+                patch(
+                    "deepmate.channels.cli.electron_pet_command",
+                    return_value=["electron", "main.js"],
+                ),
+                patch(
+                    "deepmate.channels.cli.AgentBrowserBackend.is_available",
+                    return_value=False,
+                ),
+                patch.dict(os.environ, {"DEEPSEEK_API_KEY": ""}),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                exit_code = main(("--workspace", str(workspace), "--doctor"))
+
+        self.assertEqual(exit_code, 0, stderr.getvalue())
+        output = stdout.getvalue()
+        self.assertIn("desktop_pet: ready", output)
+        self.assertIn("deepmate --pet or /pet on", output)
+        self.assertNotIn("run /pet setup", output)
+
     def test_local_status_cli_does_not_require_provider_key_or_start_server(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

@@ -3565,17 +3565,24 @@ def _doctor_text(settings: AppSettings, args: argparse.Namespace) -> str:
         lines.append(f"- model_key: missing ({exc})")
 
     sandbox_status = _sandbox_status(settings, args)
+    pet_ready = electron_pet_command(settings.data_dir) is not None
     lines.extend(
         (
             "",
             "Optional features:",
             f"- sandbox_backend: {_doctor_ok(sandbox_status.available)} ({sandbox_status.backend})",
-            f"- desktop_pet: {_doctor_optional(electron_pet_command(settings.data_dir) is not None)}",
-            "  setup: run /pet setup in the TUI, or set DEEPMATE_PET_ELECTRON to an existing Electron binary",
+            f"- desktop_pet: {_doctor_optional(pet_ready)}",
             f"- browser_backend: {_doctor_optional(AgentBrowserBackend(settings.workspace).is_available())}",
             "  install: deepmate --install-browser",
         )
     )
+    if pet_ready:
+        lines.insert(-2, "  run: deepmate --pet or /pet on in the TUI")
+    else:
+        lines.insert(
+            -2,
+            "  setup: run /pet setup in the TUI, or set DEEPMATE_PET_ELECTRON to an existing Electron binary",
+        )
     try:
         local_status = _local_runtime(settings.provider(LOCAL_PROVIDER_NAME)).status()
         lines.append(

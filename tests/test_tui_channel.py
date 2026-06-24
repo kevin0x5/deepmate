@@ -2595,6 +2595,48 @@ class TuiChannelTests(unittest.TestCase):
                 app._tool_session_approvals_for_session(app.state.session.session_id),
             )
 
+    def test_tui_workspace_write_approval_is_reused_for_create_and_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = _workspace(Path(tmp))
+            app = DeepmateTuiApp(_state(workspace))
+            approvals = []
+            app._request_approval = lambda *_args, **_kwargs: approvals.append(_args) or "session"
+            write_tool = NativeTool(
+                name="write_text_file",
+                description="Write",
+                input_schema={"type": "object"},
+                handler=lambda _args: NativeToolResult(content="ok"),
+                read_only=False,
+            )
+            edit_tool = NativeTool(
+                name="edit_text_file",
+                description="Edit",
+                input_schema={"type": "object"},
+                handler=lambda _args: NativeToolResult(content="ok"),
+                read_only=False,
+            )
+            write_decision = ToolAccessDecision(
+                allowed=False,
+                reason="Native tool requires workspace write access: write_text_file",
+                requires_approval=True,
+                refs=("tool=write_text_file", "path=a.txt"),
+            )
+            edit_decision = ToolAccessDecision(
+                allowed=False,
+                reason="Native tool requires workspace write access: edit_text_file",
+                requires_approval=True,
+                refs=("tool=edit_text_file", "path=a.txt"),
+            )
+
+            self.assertTrue(app._tool_approval(write_tool, write_decision))
+            self.assertTrue(app._tool_approval(edit_tool, edit_decision))
+
+            self.assertEqual(len(approvals), 1)
+            self.assertIn(
+                "capability:workspace-write",
+                app._tool_session_approvals_for_session(app.state.session.session_id),
+            )
+
     def test_tui_deny_pending_approval_releases_queued_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = _workspace(Path(tmp))

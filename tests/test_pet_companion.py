@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -36,6 +37,7 @@ from deepmate.pet.learning import (
 from deepmate.pet.pets import built_in_pet, built_in_pet_ids
 from deepmate.pet.policy import PetDisplayPolicy
 from deepmate.pet.service import PetBackendService
+from deepmate.pet.setup import prepare_pet_runtime
 from deepmate.pet.state import PetStateStore, PetUserAction, default_pet_profile
 from deepmate.providers import ModelResponse
 
@@ -372,6 +374,59 @@ class PetCompanionTests(unittest.TestCase):
         self.assertIsNotNone(command)
         self.assertEqual(command[0], str(electron))
         self.assertEqual(command[1], str(main_js))
+
+    def test_pet_runtime_setup_redacts_secret_environment_for_npm(self) -> None:
+        captured_env = {}
+        npm_calls = []
+
+        def fake_run(*_args, **kwargs):
+            npm_calls.append(_args[0])
+            captured_env.update(kwargs.get("env") or {})
+            ui_dir = Path(kwargs["cwd"])
+            electron = ui_dir / "node_modules" / ".bin" / "electron"
+            electron.parent.mkdir(parents=True, exist_ok=True)
+            electron.write_text("#!/bin/sh\n", encoding="utf-8")
+            return subprocess.CompletedProcess(args=_args[0], returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source_ui = Path(tmp) / "source_pet_ui"
+            packaged_ui = Path(tmp) / "packaged_pet_ui"
+            for ui_dir in (source_ui, packaged_ui):
+                (ui_dir / "electron").mkdir(parents=True)
+                (ui_dir / "renderer").mkdir()
+                (ui_dir / "package.json").write_text(
+                    '{"scripts":{},"dependencies":{"electron":"0.0.0"}}\n',
+                    encoding="utf-8",
+                )
+                (ui_dir / "electron" / "main.js").write_text(
+                    "console.log('pet')\n",
+                    encoding="utf-8",
+                )
+            with (
+                patch("shutil.which", return_value="/usr/bin/npm"),
+                patch("subprocess.run", side_effect=fake_run),
+                patch("deepmate.pet.electron_host.SOURCE_PET_UI_DIR", source_ui),
+                patch("deepmate.pet.electron_host.PACKAGED_PET_UI_DIR", packaged_ui),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "DEEPSEEK_API_KEY": "placeholder",
+                        "GITHUB_TOKEN": "placeholder",
+                        "DEEPMATE_PET_ELECTRON_MIRROR": "https://mirror.example/electron/",
+                    },
+                    clear=False,
+                ),
+            ):
+                result = prepare_pet_runtime(Path(tmp) / "var")
+
+        self.assertTrue(result.ok)
+        self.assertTrue(npm_calls)
+        self.assertNotIn("DEEPSEEK_API_KEY", captured_env)
+        self.assertNotIn("GITHUB_TOKEN", captured_env)
+        self.assertEqual(
+            captured_env.get("ELECTRON_MIRROR"),
+            "https://mirror.example/electron/",
+        )
 
     def test_copy_generation_uses_fallback_without_provider(self) -> None:
         profile = default_pet_profile("penguin")

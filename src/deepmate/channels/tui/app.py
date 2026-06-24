@@ -4847,7 +4847,7 @@ def _tool_approval_key(tool: NativeTool, decision: ToolAccessDecision) -> str:
     if clean_tool.startswith("computer_"):
         return f"capability:{clean_tool}"
     if clean_tool in {"write_text_file", "edit_text_file"}:
-        return f"capability:{clean_tool}"
+        return "capability:workspace-write"
     if clean_tool.startswith("browser_") or clean_tool == "load_browser_tools":
         return "capability:browser"
     if clean_tool.startswith("mcp.") or clean_tool in {"search_mcp_tools", "load_mcp_tool"}:

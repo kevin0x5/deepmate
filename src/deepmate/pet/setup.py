@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from deepmate.pet.electron_host import electron_pet_command, pet_runtime_ui_dir
+from deepmate.runtime.safety import safe_environment
 
 PET_SETUP_TIMEOUT_SECONDS = 10 * 60
 
@@ -96,8 +97,8 @@ def prepare_pet_runtime(
             )
 
         _emit(progress, "Installing Electron runtime for the desktop pet...")
-        env = dict(os.environ)
-        mirror = env.get("DEEPMATE_PET_ELECTRON_MIRROR", "").strip()
+        env = safe_environment()
+        mirror = os.environ.get("DEEPMATE_PET_ELECTRON_MIRROR", "").strip()
         if mirror and not env.get("ELECTRON_MIRROR"):
             env["ELECTRON_MIRROR"] = mirror
         result = subprocess.run(
