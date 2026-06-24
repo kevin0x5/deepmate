@@ -1177,7 +1177,7 @@ def _pet_setup_preview(status=None) -> str:
             "Options",
             "- If Electron is already installed, set DEEPMATE_PET_ELECTRON to that binary.",
             "- To use a faster Electron mirror, set DEEPMATE_PET_ELECTRON_MIRROR before running /pet setup.",
-            "- From a source checkout, npm --prefix pet_ui install also works.",
+            "- From a source checkout, npm --prefix src/deepmate/pet_ui install also works.",
             "- After setup, run /pet on.",
             "",
             "The pet reads Deepmate local state only; it does not watch the screen, keyboard, camera, or microphone.",

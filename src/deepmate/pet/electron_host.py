@@ -13,8 +13,7 @@ from deepmate.pet.service import PetBackendService
 from deepmate.pet.state import PetStateStore
 from deepmate.providers import ModelProvider
 
-SOURCE_PET_UI_DIR = Path(__file__).resolve().parents[3] / "pet_ui"
-PACKAGED_PET_UI_DIR = Path(__file__).resolve().parents[1] / "pet_ui"
+PET_UI_DIR = Path(__file__).resolve().parents[1] / "pet_ui"
 PET_RUNTIME_RELATIVE_DIR = Path("pet") / "ui_runtime"
 
 
@@ -116,19 +115,15 @@ def electron_pet_missing_message() -> str:
         "Normal Deepmate CLI/TUI work continues without it.\n"
         "Recommended: run `/pet setup` in the TUI, or set DEEPMATE_PET_ELECTRON "
         "to an existing Electron binary.\n"
-        "From a source checkout you can also run `npm --prefix pet_ui install`, "
+        "From a source checkout you can also run "
+        "`npm --prefix src/deepmate/pet_ui install`, "
         "then retry `deepmate --pet` or `/pet on`."
     )
 
 
-def source_pet_ui_dir() -> Path:
-    """Return the source checkout pet UI directory."""
-    return SOURCE_PET_UI_DIR
-
-
 def packaged_pet_ui_dir() -> Path:
     """Return the packaged pet UI asset directory."""
-    return PACKAGED_PET_UI_DIR
+    return PET_UI_DIR
 
 
 def pet_runtime_ui_dir(data_dir: str | Path | None) -> Path:
@@ -141,11 +136,11 @@ def _pet_ui_dir(data_dir: str | Path | None = None) -> Path:
     runtime = pet_runtime_ui_dir(data_dir)
     if _local_electron_binary(runtime) is not None and (runtime / "electron" / "main.js").exists():
         return runtime
-    if (SOURCE_PET_UI_DIR / "electron" / "main.js").exists():
-        return SOURCE_PET_UI_DIR
+    if (PET_UI_DIR / "electron" / "main.js").exists():
+        return PET_UI_DIR
     if (runtime / "electron" / "main.js").exists():
         return runtime
-    return PACKAGED_PET_UI_DIR
+    return PET_UI_DIR
 
 
 def _electron_binary(data_dir: str | Path | None = None) -> Path | None:
@@ -160,9 +155,8 @@ def _electron_and_ui_dir(data_dir: str | Path | None = None) -> tuple[Path, Path
         if binary.exists():
             return binary, _pet_ui_dir(data_dir)
     for ui_dir in (
-        SOURCE_PET_UI_DIR,
         pet_runtime_ui_dir(data_dir),
-        PACKAGED_PET_UI_DIR,
+        PET_UI_DIR,
     ):
         if not (ui_dir / "electron" / "main.js").exists():
             continue

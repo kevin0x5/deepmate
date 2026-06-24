@@ -53,6 +53,9 @@ class _CopyProvider:
 
 
 class PetCompanionTests(unittest.TestCase):
+    def _pet_ui_root(self) -> Path:
+        return Path(__file__).resolve().parents[1] / "src" / "deepmate" / "pet_ui"
+
     def test_state_store_selects_profile_and_writes_current_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = PetStateStore.in_data_dir(tmp)
@@ -244,26 +247,26 @@ class PetCompanionTests(unittest.TestCase):
             self.assertEqual(set(cache), {f"k{index}" for index in range(40)})
 
     def test_electron_pet_frontend_assets_exist(self) -> None:
-        root = Path(__file__).resolve().parents[1]
-        self.assertTrue((root / "pet_ui/package.json").exists())
-        self.assertTrue((root / "pet_ui/electron/main.js").exists())
-        self.assertTrue((root / "pet_ui/electron/preload.js").exists())
-        self.assertTrue((root / "pet_ui/renderer/pet.html").exists())
-        self.assertTrue((root / "pet_ui/renderer/bubble.html").exists())
-        self.assertTrue((root / "pet_ui/renderer/hud.html").exists())
+        root = self._pet_ui_root()
+        self.assertTrue((root / "package.json").exists())
+        self.assertTrue((root / "electron/main.js").exists())
+        self.assertTrue((root / "electron/preload.js").exists())
+        self.assertTrue((root / "renderer/pet.html").exists())
+        self.assertTrue((root / "renderer/bubble.html").exists())
+        self.assertTrue((root / "renderer/hud.html").exists())
 
     def test_electron_pet_frontend_is_transparent_pixel_surface(self) -> None:
-        root = Path(__file__).resolve().parents[1]
-        main_js = (root / "pet_ui/electron/main.js").read_text(encoding="utf-8")
-        preload_js = (root / "pet_ui/electron/preload.js").read_text(encoding="utf-8")
-        pet_html = (root / "pet_ui/renderer/pet.html").read_text(encoding="utf-8")
-        pet_js = (root / "pet_ui/renderer/pet.js").read_text(encoding="utf-8")
-        hud_html = (root / "pet_ui/renderer/hud.html").read_text(encoding="utf-8")
-        hud_js = (root / "pet_ui/renderer/hud.js").read_text(encoding="utf-8")
-        hud_css = (root / "pet_ui/renderer/styles/hud.css").read_text(encoding="utf-8")
-        pet_css = (root / "pet_ui/renderer/styles/pet.css").read_text(encoding="utf-8")
-        bubble_js = (root / "pet_ui/renderer/bubble.js").read_text(encoding="utf-8")
-        bubble_css = (root / "pet_ui/renderer/styles/bubble.css").read_text(encoding="utf-8")
+        root = self._pet_ui_root()
+        main_js = (root / "electron/main.js").read_text(encoding="utf-8")
+        preload_js = (root / "electron/preload.js").read_text(encoding="utf-8")
+        pet_html = (root / "renderer/pet.html").read_text(encoding="utf-8")
+        pet_js = (root / "renderer/pet.js").read_text(encoding="utf-8")
+        hud_html = (root / "renderer/hud.html").read_text(encoding="utf-8")
+        hud_js = (root / "renderer/hud.js").read_text(encoding="utf-8")
+        hud_css = (root / "renderer/styles/hud.css").read_text(encoding="utf-8")
+        pet_css = (root / "renderer/styles/pet.css").read_text(encoding="utf-8")
+        bubble_js = (root / "renderer/bubble.js").read_text(encoding="utf-8")
+        bubble_css = (root / "renderer/styles/bubble.css").read_text(encoding="utf-8")
 
         self.assertIn("frame: false", main_js)
         self.assertIn("transparent: true", main_js)
@@ -368,7 +371,7 @@ class PetCompanionTests(unittest.TestCase):
             electron.write_text("#!/bin/sh\n", encoding="utf-8")
             main_js.write_text("console.log('pet')\n", encoding="utf-8")
 
-            with patch("deepmate.pet.electron_host.SOURCE_PET_UI_DIR", source_dir):
+            with patch("deepmate.pet.electron_host.PET_UI_DIR", source_dir):
                 command = electron_pet_command(data_dir)
 
         self.assertIsNotNone(command)
@@ -389,24 +392,21 @@ class PetCompanionTests(unittest.TestCase):
             return subprocess.CompletedProcess(args=_args[0], returncode=0, stdout="", stderr="")
 
         with tempfile.TemporaryDirectory() as tmp:
-            source_ui = Path(tmp) / "source_pet_ui"
             packaged_ui = Path(tmp) / "packaged_pet_ui"
-            for ui_dir in (source_ui, packaged_ui):
-                (ui_dir / "electron").mkdir(parents=True)
-                (ui_dir / "renderer").mkdir()
-                (ui_dir / "package.json").write_text(
-                    '{"scripts":{},"dependencies":{"electron":"0.0.0"}}\n',
-                    encoding="utf-8",
-                )
-                (ui_dir / "electron" / "main.js").write_text(
-                    "console.log('pet')\n",
-                    encoding="utf-8",
-                )
+            (packaged_ui / "electron").mkdir(parents=True)
+            (packaged_ui / "renderer").mkdir()
+            (packaged_ui / "package.json").write_text(
+                '{"scripts":{},"dependencies":{"electron":"0.0.0"}}\n',
+                encoding="utf-8",
+            )
+            (packaged_ui / "electron" / "main.js").write_text(
+                "console.log('pet')\n",
+                encoding="utf-8",
+            )
             with (
                 patch("shutil.which", return_value="/usr/bin/npm"),
                 patch("subprocess.run", side_effect=fake_run),
-                patch("deepmate.pet.electron_host.SOURCE_PET_UI_DIR", source_ui),
-                patch("deepmate.pet.electron_host.PACKAGED_PET_UI_DIR", packaged_ui),
+                patch("deepmate.pet.electron_host.PET_UI_DIR", packaged_ui),
                 patch.dict(
                     "os.environ",
                     {
