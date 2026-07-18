@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import struct
 import tempfile
 import threading
@@ -14,12 +16,17 @@ from unittest.mock import patch
 from deepmate.app import AppSettings, ProviderSettings, RemoteSettings, WeComRemoteSettings
 from deepmate.channels.interactive import _close_remote_routes_for_local_turn, _handle_command
 from deepmate.channels.wecom import WeComChannel, WeComInboundMessage, WeComRunDependencies
-from deepmate.channels.wecom.channel import parse_wecom_message
+from deepmate.channels.wecom.channel import (
+    _RemoteApprovalRequest,
+    _wait_for_subscribe_ack,
+    parse_wecom_message,
+)
 from deepmate.channels.wecom.client import (
     MAX_WEBSOCKET_FRAME_BYTES,
     WeComClientConfig,
     WeComProtocolError,
     WeComWsClient,
+    _host_header,
 )
 from deepmate.channels.remote import RemoteBindingStore
 from deepmate.domain import ProfileRef
@@ -80,6 +87,83 @@ class FakeWakeSession:
 
 
 class RemoteWeComTests(unittest.TestCase):
+    def test_wecom_ws_client_closes_socket_after_empty_upgrade_response(self) -> None:
+        sock = _FakeSocket()
+        client = WeComWsClient(
+            WeComClientConfig(bot_id="bot", secret="fake-secret", url="ws://example.test")
+        )
+
+        with patch(
+            "deepmate.channels.wecom.client.socket.create_connection",
+            return_value=sock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "empty response"):
+                client.connect()
+
+        self.assertTrue(sock.closed)
+
+    def test_wecom_ws_client_preserves_frame_buffered_with_upgrade_response(self) -> None:
+        nonce = b"\0" * 16
+        key = base64.b64encode(nonce).decode("ascii")
+        accept = base64.b64encode(
+            hashlib.sha1(
+                (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+            ).digest()
+        ).decode("ascii")
+        response = (
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+        ).encode("ascii")
+        frame = _server_frame(b'{"cmd":"message","content":"ready"}')
+        sock = _FakeSocket(response + frame)
+        client = WeComWsClient(
+            WeComClientConfig(bot_id="bot", secret="fake-secret", url="ws://example.test")
+        )
+
+        with (
+            patch(
+                "deepmate.channels.wecom.client.socket.create_connection",
+                return_value=sock,
+            ),
+            patch("deepmate.channels.wecom.client.os.urandom", return_value=nonce),
+        ):
+            client.connect()
+            payload = client.recv_json()
+
+        self.assertEqual(payload["content"], "ready")
+
+    def test_wecom_ws_client_rejects_masked_server_frame(self) -> None:
+        client = WeComWsClient(WeComClientConfig(bot_id="bot", secret="fake-secret"))
+        client._sock = _FakeSocket(bytes((0x81, 0x80)))
+
+        with self.assertRaisesRegex(WeComProtocolError, "must not be masked"):
+            client.recv_json()
+
+    def test_wecom_host_header_includes_non_default_port_and_ipv6_brackets(self) -> None:
+        self.assertEqual(_host_header("example.test", 443, "wss"), "example.test")
+        self.assertEqual(_host_header("example.test", 8443, "wss"), "example.test:8443")
+        self.assertEqual(
+            _host_header("ipv6:documentation", 8443, "wss"),
+            "[ipv6:documentation]:8443",
+        )
+
+    def test_subscribe_failure_does_not_serialize_secret_fields(self) -> None:
+        class Client:
+            def recv_json_timeout(self, timeout):
+                return {
+                    "cmd": "aibot_subscribe_ack",
+                    "success": False,
+                    "errcode": 400,
+                    "errmsg": "denied",
+                    "secret": "fake-secret-value",
+                }
+
+        with self.assertRaises(RuntimeError) as raised:
+            _wait_for_subscribe_ack(Client(), timeout=0.1)
+
+        self.assertIn("errcode=400", str(raised.exception))
+        self.assertNotIn("fake-secret-value", str(raised.exception))
+
     def test_wecom_ws_client_reassembles_fragmented_json_message(self) -> None:
         client = WeComWsClient(WeComClientConfig(bot_id="bot", secret="secret"))
         client._sock = _FakeSocket(
@@ -117,6 +201,18 @@ class RemoteWeComTests(unittest.TestCase):
                 "cmd": "aibot_msg_callback",
                 "content": "hello",
                 "user_id": "alice",
+            }
+        )
+
+        self.assertIsNone(message)
+
+    def test_parse_wecom_message_rejects_oversized_identity_fields(self) -> None:
+        message = parse_wecom_message(
+            {
+                "cmd": "message",
+                "content": "hello",
+                "user_id": "u" * 300,
+                "req_id": "req_1",
             }
         )
 
@@ -488,6 +584,175 @@ class RemoteWeComTests(unittest.TestCase):
             self.assertEqual(wake.finished, 1)
             self.assertTrue(any("企业微信接管已开启" in _sent_text(item) for item in sent))
             self.assertTrue(any("done" in _sent_content(item) for item in sent))
+
+    def test_wecom_group_chats_use_distinct_session_scopes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _settings(root)
+            session_store = SessionStore.in_directory(settings.data_dir / "sessions")
+            provider = StubProvider(ModelResponse(content="done"))
+            channel = WeComChannel(
+                WeComRunDependencies(
+                    settings=settings,
+                    provider=provider,
+                    model="stub-model",
+                    session_store=session_store,
+                    trace_recorder=TraceRecorder(_TraceSink()),
+                ),
+                sender=lambda payload: None,
+                wake_factory=lambda reason: FakeWakeSession(),
+            )
+
+            channel.handle_message(
+                WeComInboundMessage("req_a", "alice", "group_a", "group", "first")
+            )
+            channel.handle_message(
+                WeComInboundMessage("req_b", "alice", "group_b", "group", "second")
+            )
+
+            bindings = RemoteBindingStore.in_data_dir(settings.data_dir).list_records()
+
+        self.assertEqual(len(channel._states), 2)
+        self.assertEqual({record.remote_user_id for record in bindings}, {"group:group_a", "group:group_b"})
+        self.assertEqual(len({record.session_id for record in bindings}), 2)
+        self.assertEqual(len(provider.requests), 2)
+
+    def test_first_group_atomically_claims_default_local_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _settings(root)
+            session_store = SessionStore.in_directory(settings.data_dir / "sessions")
+            local_session = session_store.create(
+                root,
+                settings.profile_ref(),
+                "Local task",
+            )
+            store = RemoteBindingStore.in_data_dir(settings.data_dir)
+            store.bind_default_session(
+                channel="wecom",
+                session=local_session,
+                bound_from="interactive",
+                route_open=True,
+            )
+            channel = WeComChannel(
+                WeComRunDependencies(
+                    settings=settings,
+                    provider=StubProvider(ModelResponse(content="unused")),
+                    model="stub-model",
+                    session_store=session_store,
+                    trace_recorder=TraceRecorder(_TraceSink()),
+                ),
+                binding_store=store,
+                sender=lambda payload: None,
+                wake_factory=lambda reason: FakeWakeSession(),
+            )
+
+            channel.handle_message(
+                WeComInboundMessage("req_a", "alice", "group_a", "group", "/current")
+            )
+            channel.handle_message(
+                WeComInboundMessage("req_b", "alice", "group_b", "group", "/current")
+            )
+
+            first = store.get("wecom", "group:group_a")
+            second = store.get("wecom", "group:group_b")
+            default = store.get("wecom", "*")
+
+        self.assertIsNone(default)
+        self.assertEqual(first.session_id, local_session.session_id)
+        self.assertNotEqual(second.session_id, local_session.session_id)
+
+    def test_wecom_duplicate_request_is_not_executed_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _settings(root)
+            provider = StubProvider(ModelResponse(content="done"))
+            sent = []
+            channel = WeComChannel(
+                WeComRunDependencies(
+                    settings=settings,
+                    provider=provider,
+                    model="stub-model",
+                    session_store=SessionStore.in_directory(settings.data_dir / "sessions"),
+                    trace_recorder=TraceRecorder(_TraceSink()),
+                ),
+                sender=sent.append,
+                wake_factory=lambda reason: FakeWakeSession(),
+            )
+            message = WeComInboundMessage("same_req", "alice", "chat_1", "single", "run once")
+
+            channel.handle_message(message)
+            channel.handle_message(message)
+
+        self.assertEqual(len(provider.requests), 1)
+        self.assertTrue(any("不会重复执行" in _sent_content(item) for item in sent))
+
+    def test_wecom_oversized_prompt_is_rejected_before_model_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _settings(root)
+            provider = StubProvider(ModelResponse(content="unused"))
+            sent = []
+            channel = WeComChannel(
+                WeComRunDependencies(
+                    settings=settings,
+                    provider=provider,
+                    model="stub-model",
+                    session_store=SessionStore.in_directory(settings.data_dir / "sessions"),
+                    trace_recorder=TraceRecorder(_TraceSink()),
+                ),
+                sender=sent.append,
+                wake_factory=lambda reason: FakeWakeSession(),
+            )
+
+            channel.handle_message(
+                WeComInboundMessage("req_large", "alice", "chat_1", "single", "x" * 33_000)
+            )
+
+        self.assertEqual(provider.requests, [])
+        self.assertTrue(any("消息过长" in _sent_content(item) for item in sent))
+
+    def test_wecom_async_turn_claim_is_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _settings(root)
+            sent = []
+            channel = WeComChannel(
+                WeComRunDependencies(
+                    settings=settings,
+                    provider=StubProvider(ModelResponse(content="unused")),
+                    model="stub-model",
+                    session_store=SessionStore.in_directory(settings.data_dir / "sessions"),
+                    trace_recorder=TraceRecorder(_TraceSink()),
+                ),
+                sender=sent.append,
+                wake_factory=lambda reason: FakeWakeSession(),
+            )
+            entered = threading.Event()
+            release = threading.Event()
+            calls = []
+
+            def fake_run(message, state, clean):
+                calls.append(clean)
+                entered.set()
+                release.wait(2)
+                with state.lock:
+                    state.is_processing = False
+
+            with patch.object(channel, "_run_turn", side_effect=fake_run):
+                channel.handle_message(
+                    WeComInboundMessage("req_1", "alice", "chat_1", "single", "first"),
+                    async_turn=True,
+                )
+                self.assertTrue(entered.wait(1))
+                channel.handle_message(
+                    WeComInboundMessage("req_2", "alice", "chat_1", "single", "follow up"),
+                    async_turn=True,
+                )
+                self.assertTrue(_wait_for_sent_text(sent, "补充要求", timeout=1))
+                self.assertEqual(calls, ["first"])
+                release.set()
+                self.assertTrue(_wait_for_idle(channel, timeout=1))
 
     def test_current_command_reports_existing_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1023,6 +1288,53 @@ class RemoteWeComTests(unittest.TestCase):
         self.assertFalse(marker["called"])
         self.assertIn("企业微信接管已关闭", output)
 
+    def test_remote_approval_can_only_be_resolved_by_requesting_user(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = _settings(root)
+            settings = replace(
+                base,
+                remote=replace(
+                    base.remote,
+                    wecom=replace(
+                        base.remote.wecom,
+                        allowed_users=("alice", "bob"),
+                        group_policy="full",
+                    ),
+                ),
+            )
+            sent = []
+            channel = WeComChannel(
+                WeComRunDependencies(
+                    settings=settings,
+                    provider=StubProvider(ModelResponse(content="unused")),
+                    model="stub-model",
+                    session_store=SessionStore.in_directory(settings.data_dir / "sessions"),
+                    trace_recorder=TraceRecorder(_TraceSink()),
+                ),
+                sender=sent.append,
+                wake_factory=lambda reason: FakeWakeSession(),
+            )
+            channel.handle_message(
+                WeComInboundMessage("req_1", "alice", "group_1", "group", "/current")
+            )
+            state = next(iter(channel._states.values()))
+            pending = _RemoteApprovalRequest(
+                tool_name="write_file",
+                reason="write operation",
+                event=threading.Event(),
+                requested_by="alice",
+            )
+            with state.lock:
+                state.pending_approval = pending
+
+            channel.handle_message(
+                WeComInboundMessage("req_2", "bob", "group_1", "group", "/approve")
+            )
+
+        self.assertFalse(pending.event.is_set())
+        self.assertTrue(any("只有发起" in _sent_content(item) for item in sent))
+
     def test_remote_safety_approval_callback_allows_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1367,6 +1679,7 @@ class _FakeSocket:
         self.data = bytearray(data)
         self.sent = bytearray()
         self.timeout = None
+        self.closed = False
 
     def recv(self, size: int) -> bytes:
         if not self.data:
@@ -1383,6 +1696,9 @@ class _FakeSocket:
 
     def settimeout(self, value):
         self.timeout = value
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _server_frame(payload: bytes, *, opcode: int = 0x1, fin: bool = True) -> bytes:

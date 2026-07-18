@@ -215,8 +215,13 @@ Optional integrations
 
 ## Safety and Privacy
 
-- API keys and remote secrets are read from environment variables, never committed.
+- API keys and remote secrets are read from environment variables or the private local
+  secret store under `var/`; the desktop pet frontend does not inherit them.
 - Local runtime state is written under `var/` and ignored by Git.
+- Enterprise WeChat group conversations are session-isolated, inbound request IDs are
+  deduplicated, and remote approvals can only be resolved by the requesting user.
+- Desktop-pet learning sends coarse interest tags rather than raw current-work summaries;
+  feedback is merged by the Python backend instead of directly overwriting shared state.
 - Workspace writes are path-guarded and checkpointed.
 - Shell, network, and MCP write tools are off by default and require explicit flags.
 - Tool outputs can be compacted and retrieved by handle rather than replayed in full.

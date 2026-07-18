@@ -188,6 +188,36 @@ class RemoteBindingStore:
             self._save_records(records)
         return record
 
+    def claim_default_session(
+        self,
+        *,
+        channel: str,
+        remote_user_id: str,
+    ) -> RemoteBindingRecord | None:
+        """Atomically move a channel default binding to one conversation scope."""
+        clean_channel = channel.strip()
+        clean_user = remote_user_id.strip()
+        if not clean_channel or not clean_user or clean_user == "*":
+            return None
+        default_key = _binding_key(clean_channel, "*")
+        target_key = _binding_key(clean_channel, clean_user)
+        with file_lock(self.path):
+            records = self._load_records()
+            existing = records.get(target_key)
+            if existing is not None:
+                return existing
+            default = records.pop(default_key, None)
+            if default is None:
+                return None
+            claimed = replace(
+                default,
+                remote_user_id=clean_user,
+                bound_at=_now_iso(),
+            )
+            records[target_key] = claimed
+            self._save_records(records)
+        return claimed
+
     def remove(self, channel: str, remote_user_id: str) -> RemoteBindingRecord | None:
         key = _binding_key(channel, remote_user_id)
         with file_lock(self.path):

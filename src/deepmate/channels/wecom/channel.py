@@ -65,6 +65,10 @@ REMOTE_STREAM_LIMIT_BYTES = 20000
 REMOTE_TAIL_LIMIT_BYTES = 4000
 REMOTE_STATUS_LIMIT = 800
 REMOTE_BINDING_REFRESH_INTERVAL_SECONDS = 15.0
+REMOTE_REQUEST_DEDUPE_TTL_SECONDS = 24 * 60 * 60.0
+REMOTE_REQUEST_DEDUPE_MAX_ENTRIES = 2048
+REMOTE_PROMPT_LIMIT_BYTES = 32_000
+REMOTE_ID_LIMIT_CHARS = 256
 WEBCOM_RECONNECT_INITIAL_DELAY_SECONDS = 1.0
 WEBCOM_RECONNECT_MAX_DELAY_SECONDS = 30.0
 WEBCOM_PING_INTERVAL_SECONDS = 30.0
@@ -143,6 +147,7 @@ class _RemoteApprovalRequest:
     tool_name: str
     reason: str
     event: threading.Event
+    requested_by: str = ""
     approved: bool = False
     created_at: float = 0.0
 
@@ -194,6 +199,7 @@ class WeComChannel:
         self._lock = threading.Lock()
         self._send_rate_lock = threading.Lock()
         self._send_timestamps: list[float] = []
+        self._request_states: dict[tuple[str, str], tuple[str, float]] = {}
 
     def handle_payload(self, payload: Mapping[str, object]) -> None:
         if self._handle_protocol_status_payload(payload):
@@ -229,23 +235,58 @@ class WeComChannel:
         if not clean:
             self._send_text(message, "收到空消息，未执行。")
             return
+        if _utf8_len(clean) > REMOTE_PROMPT_LIMIT_BYTES:
+            self._send_text(
+                message,
+                f"消息过长，远程输入上限为 {REMOTE_PROMPT_LIMIT_BYTES} 字节。",
+            )
+            return
         if self._readonly_group_command_denied(message, clean):
             self._send_text(
                 message,
                 "当前企业微信群策略为 readonly，只允许查询状态或执行只读任务。",
             )
             return
+        if not self._begin_request(message):
+            self._send_text(message, "这条企业微信消息已经接收，不会重复执行。")
+            return
         if async_turn:
             worker = threading.Thread(
-                target=self._handle_message_ready,
+                target=self._handle_message_ready_guarded,
                 args=(message, clean, True),
                 name=f"deepmate-wecom-dispatch-{message.req_id}",
                 daemon=True,
             )
-            worker.start()
+            try:
+                worker.start()
+            except RuntimeError:
+                self._finish_request(message)
+                raise
             return
 
-        self._handle_message_ready(message, clean, False)
+        self._handle_message_ready_guarded(message, clean, False)
+
+    def _handle_message_ready_guarded(
+        self,
+        message: WeComInboundMessage,
+        clean: str,
+        async_turn: bool,
+    ) -> None:
+        try:
+            self._handle_message_ready(message, clean, async_turn)
+        except Exception as exc:
+            self.deps.trace_recorder.record(
+                TraceEvent(
+                    kind="wecom_dispatch_failed",
+                    summary=(
+                        "WeCom dispatch failed before a normal turn result was produced."
+                    ),
+                    refs=(f"error_type={type(exc).__name__}",),
+                )
+            )
+            self._send_text(message, "远程任务处理失败，请稍后重试或在本机查看日志。")
+        finally:
+            self._finish_request(message)
 
     def _handle_message_ready(
         self,
@@ -267,6 +308,9 @@ class WeComChannel:
         with state.lock:
             is_processing = state.is_processing
             active_followup_turn_id = state.active_followup_turn_id
+            if not is_processing:
+                state.is_processing = True
+                state.active_followup_turn_id = state.followup_buffer.start_turn()
         if is_processing:
             submitted = state.followup_buffer.submit(
                 active_followup_turn_id,
@@ -289,12 +333,6 @@ class WeComChannel:
             else:
                 self._send_text(message, "当前任务即将结束，这条消息请稍后重发。")
             return
-        if async_turn:
-            with state.lock:
-                state.is_processing = True
-                state.active_followup_turn_id = state.followup_buffer.start_turn()
-            self._run_turn(message, state, clean)
-            return
         self._run_turn(message, state, clean)
 
     def _state_for_message(
@@ -304,10 +342,16 @@ class WeComChannel:
         first_prompt: str,
         open_route: bool = True,
     ) -> _SessionState:
-        key = f"{CHANNEL}:{message.user_id}"
+        binding_id = _remote_binding_id(message)
+        key = f"{CHANNEL}:{binding_id}"
         with self._lock:
-            binding = self.binding_store.get(CHANNEL, message.user_id)
-            if binding is None:
+            binding = self.binding_store.get(CHANNEL, binding_id)
+            if binding is None and _is_group_message(message):
+                binding = self.binding_store.claim_default_session(
+                    channel=CHANNEL,
+                    remote_user_id=binding_id,
+                )
+            if binding is None and not _is_group_message(message):
                 binding = self.binding_store.get(CHANNEL, "*")
             state = self._states.get(key)
             if (
@@ -337,7 +381,7 @@ class WeComChannel:
                 )
                 binding = self.binding_store.bind_session(
                     channel=CHANNEL,
-                    remote_user_id=message.user_id,
+                    remote_user_id=binding_id,
                     session=session,
                     bound_from="remote",
                 )
@@ -367,7 +411,7 @@ class WeComChannel:
                 else:
                     binding = self.binding_store.bind_session(
                         channel=CHANNEL,
-                        remote_user_id=message.user_id,
+                        remote_user_id=binding_id,
                         session=session,
                         bound_from="remote",
                     )
@@ -503,6 +547,9 @@ class WeComChannel:
             pending = state.pending_approval
         if pending is None:
             self._send_text(message, "当前没有等待远程审批的操作。")
+            return
+        if pending.requested_by and pending.requested_by != message.user_id:
+            self._send_text(message, "只有发起这次操作的用户可以处理该审批。")
             return
         binding = self._refresh_state_binding(state, force=True)
         if approved and not binding.route_open:
@@ -703,6 +750,7 @@ class WeComChannel:
             tool_name=tool.name,
             reason=decision.reason,
             event=threading.Event(),
+            requested_by=message.user_id,
             created_at=time.monotonic(),
         )
         with state.lock:
@@ -761,6 +809,7 @@ class WeComChannel:
             tool_name=name,
             reason=_safety_decision_reason(decision),
             event=threading.Event(),
+            requested_by=message.user_id,
             created_at=time.monotonic(),
         )
         with state.lock:
@@ -1077,6 +1126,46 @@ class WeComChannel:
             )
             return False
 
+    def _begin_request(self, message: WeComInboundMessage) -> bool:
+        """Atomically reserve one inbound request for idempotent processing."""
+        key = _remote_request_key(message)
+        now = time.monotonic()
+        with self._lock:
+            cutoff = now - REMOTE_REQUEST_DEDUPE_TTL_SECONDS
+            self._request_states = {
+                item: value
+                for item, value in self._request_states.items()
+                if value[1] >= cutoff
+            }
+            if key in self._request_states:
+                return False
+            completed = sorted(
+                (
+                    (item, value)
+                    for item, value in self._request_states.items()
+                    if value[0] == "completed"
+                ),
+                key=lambda pair: pair[1][1],
+            )
+            while (
+                len(self._request_states) >= REMOTE_REQUEST_DEDUPE_MAX_ENTRIES
+                and completed
+            ):
+                item, _ = completed.pop(0)
+                self._request_states.pop(item, None)
+            if len(self._request_states) >= REMOTE_REQUEST_DEDUPE_MAX_ENTRIES:
+                return False
+            self._request_states[key] = ("processing", now)
+            return True
+
+    def _finish_request(self, message: WeComInboundMessage) -> None:
+        """Mark one reserved inbound request complete without retaining its content."""
+        with self._lock:
+            self._request_states[_remote_request_key(message)] = (
+                "completed",
+                time.monotonic(),
+            )
+
     def _wait_for_send_slot(self, *, timeout: float) -> bool:
         limit = max(1, self.deps.settings.remote.wecom.max_messages_per_minute)
         deadline = time.monotonic() + max(0.0, timeout)
@@ -1131,17 +1220,15 @@ class WeComChannel:
         errcode = _int_field(payload, "errcode")
         if errcode is None:
             return False
-        errmsg = _text(payload, "errmsg") or _text(payload, "error")
         cmd = _text(payload, "cmd") or _text(payload, "command")
         if errcode != 0:
             self.deps.trace_recorder.record(
                 TraceEvent(
                     kind="wecom_protocol_error",
-                    summary=f"WeCom protocol error: {errcode} {errmsg}".strip(),
+                    summary=f"WeCom protocol error: {errcode}",
                     refs=(
                         f"cmd={cmd or '-'}",
                         f"errcode={errcode}",
-                        f"errmsg={_compact_line(errmsg, 300) or '-'}",
                     ),
                 )
             )
@@ -1208,7 +1295,13 @@ def run_wecom_remote_channel(deps: WeComRunDependencies) -> int:
                     )
                     continue
                 channel.dispatch_payload(payload)
-        except (EOFError, OSError, RuntimeError, WeComProtocolError) as exc:
+        except (
+            EOFError,
+            OSError,
+            RuntimeError,
+            WeComPayloadError,
+            WeComProtocolError,
+        ) as exc:
             deps.trace_recorder.record(
                 TraceEvent(
                     kind="wecom_reconnect",
@@ -1246,10 +1339,16 @@ def parse_wecom_message(payload: Mapping[str, object]) -> WeComInboundMessage | 
     req_id = _text(payload, "req_id") or _text(payload, "msg_id")
     if not req_id:
         return None
+    chat_id = _text(payload, "chat_id") or _text(payload, "conversation_id")
+    if any(
+        len(value) > REMOTE_ID_LIMIT_CHARS
+        for value in (req_id, user_id, chat_id)
+    ):
+        return None
     return WeComInboundMessage(
         req_id=req_id,
         user_id=user_id,
-        chat_id=_text(payload, "chat_id") or _text(payload, "conversation_id"),
+        chat_id=chat_id,
         chat_type=_text(payload, "chat_type") or _text(payload, "conversation_type") or "single",
         content=content,
     )
@@ -1270,10 +1369,25 @@ def _wait_for_subscribe_ack(
     errcode = payload.get("errcode", payload.get("error_code"))
     status = _text(payload, "status").lower()
     if success is False or (isinstance(errcode, int) and errcode != 0):
-        raise RuntimeError(f"WeCom subscribe failed: {payload}")
+        raise RuntimeError(_subscribe_failure_message(payload))
     if status and status not in {"ok", "success", "subscribed"}:
-        raise RuntimeError(f"WeCom subscribe failed: {payload}")
+        raise RuntimeError(_subscribe_failure_message(payload))
     return None
+
+
+def _subscribe_failure_message(payload: Mapping[str, object]) -> str:
+    """Return a bounded protocol failure without serializing credential fields."""
+    errcode = _int_field(payload, "errcode")
+    if errcode is None:
+        errcode = _int_field(payload, "error_code")
+    status = _text(payload, "status")
+    message = _text(payload, "errmsg") or _text(payload, "error")
+    return (
+        "WeCom subscribe failed: "
+        f"errcode={errcode if errcode is not None else '-'} "
+        f"status={_compact_line(status, 80) or '-'} "
+        f"message={_compact_line(message, 240) or '-'}"
+    )
 
 
 def _current_status(state: _SessionState) -> str:
@@ -1726,6 +1840,20 @@ def _looks_like_markdown(text: str) -> bool:
 def _is_group_message(message: WeComInboundMessage) -> bool:
     clean = message.chat_type.strip().lower()
     return clean in {"group", "room", "chatroom", "group_chat", "multi"}
+
+
+def _remote_binding_id(message: WeComInboundMessage) -> str:
+    """Return a conversation-scoped binding id without embedding message content."""
+    if _is_group_message(message):
+        chat_id = message.chat_id.strip()
+        if chat_id:
+            return f"group:{chat_id}"
+        return f"group-user:{message.user_id}"
+    return message.user_id
+
+
+def _remote_request_key(message: WeComInboundMessage) -> tuple[str, str]:
+    return (_remote_binding_id(message), message.req_id)
 
 
 def _utf8_len(text: str) -> int:

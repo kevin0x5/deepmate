@@ -3817,9 +3817,9 @@ def _consume_pet_open_actions(
     processed = 0
     selected_session_id = ""
     for index, action in pending:
+        processed = max(processed, index)
         if action.action != "open_current_work":
             continue
-        processed = max(processed, index)
         session_id = _text_value(action.payload.get("session_id"))
         if not session_id:
             continue

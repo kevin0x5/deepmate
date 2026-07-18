@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import monotonic
@@ -42,6 +42,7 @@ CARE_ACTIVE_KINDS = {
     "task.progress",
     "task.waiting",
 }
+MAX_LEARNING_SOURCES = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +88,10 @@ class PetBackendService:
         self._care_emitted_keys: set[str] = set()
         self._active_work_key = ""
         self._active_work_started_at: datetime | None = None
+        self._active_override_event: PetEvent | None = None
+        self._active_override_bubble: dict[str, object] | None = None
+        self._active_override_anchor_event_id = ""
+        self._active_override_expires_at = 0.0
 
     def run_forever(self) -> None:
         """Run until ``stop`` is called or the process is interrupted."""
@@ -102,12 +107,15 @@ class PetBackendService:
         """Refresh state, maybe emit proactive cards, and publish UI state."""
         try:
             self._prune_care_emitted_keys()
+            self._consume_learning_feedback()
             self.profile = self._load_profile()
             ui_state = self.store.load_pet_state()
             muted = _bool(
                 ui_state.get("muted"),
                 False,
-            ) or _profile_muted_until_active(self.profile)
+            ) or _profile_muted_until_active(self.profile) or _timestamp_is_future(
+                _text(ui_state.get("muted_until"))
+            )
             collapsed = _bool(ui_state.get("collapsed"), False) or _bool(
                 ui_state.get("mini"),
                 False,
@@ -139,14 +147,36 @@ class PetBackendService:
     ) -> PetServiceSnapshot:
         """Publish one event as frontend UI state."""
         with self._publish_lock:
-            decision = self.policy.decide(event)
+            now = monotonic()
+            render_event = event
+            active_bubble: dict[str, object] | None = None
+            if bubble_override is not None:
+                active_bubble = dict(bubble_override)
+                duration_ms = _positive_int(active_bubble.get("duration_ms"), 7_500)
+                self._active_override_event = event
+                self._active_override_bubble = active_bubble
+                self._active_override_anchor_event_id = (
+                    self.current_event.event_id or event.event_id
+                )
+                self._active_override_expires_at = now + duration_ms / 1000.0
+            elif self._active_override_event is not None:
+                if (
+                    muted
+                    or now >= self._active_override_expires_at
+                    or event.event_id != self._active_override_anchor_event_id
+                ):
+                    self._clear_active_override()
+                else:
+                    render_event = self._active_override_event
+                    active_bubble = dict(self._active_override_bubble or {})
+            decision = self.policy.decide(render_event)
             bubble = (
-                dict(bubble_override)
-                if bubble_override is not None
-                else self._bubble_for_event(event, decision, muted=muted)
+                active_bubble
+                if active_bubble is not None
+                else self._bubble_for_event(render_event, decision, muted=muted)
             )
             record = _ui_state_record(
-                event,
+                render_event,
                 self.profile,
                 decision,
                 bubble=bubble,
@@ -156,7 +186,62 @@ class PetBackendService:
             if signature != self.current_ui_signature:
                 self.store.save_ui_state(record)
                 self.current_ui_signature = signature
-            return PetServiceSnapshot(record=record, event=event, profile=self.profile)
+            return PetServiceSnapshot(
+                record=record,
+                event=render_event,
+                profile=self.profile,
+            )
+
+    def _clear_active_override(self) -> None:
+        self._active_override_event = None
+        self._active_override_bubble = None
+        self._active_override_anchor_event_id = ""
+        self._active_override_expires_at = 0.0
+
+    def _consume_learning_feedback(self) -> None:
+        pending = self.store.pending_feedback(limit=50)
+        if not pending:
+            return
+        records = tuple(record for _, record in pending)
+
+        def merge(state: dict[str, object]) -> None:
+            raw_feedback = state.get("feedback")
+            feedback = list(raw_feedback) if isinstance(raw_feedback, list) else []
+            raw_suppressed = state.get("suppressed_until")
+            suppressed = (
+                dict(raw_suppressed) if isinstance(raw_suppressed, Mapping) else {}
+            )
+            for record in records:
+                value = _text(record.get("value"))
+                if value not in {"useful", "less_often"}:
+                    continue
+                reason = bounded_pet_text(_text(record.get("reason")), 100)
+                feedback.append(
+                    {
+                        "value": value,
+                        "created_at": bounded_pet_text(
+                            _text(record.get("created_at")), 80
+                        ),
+                        "event_id": bounded_pet_text(
+                            _text(record.get("event_id")), 120
+                        ),
+                        "kind": bounded_pet_text(_text(record.get("kind")), 80),
+                        "reason": reason,
+                        "title": bounded_pet_text(_text(record.get("title")), 160),
+                        "summary": bounded_pet_text(
+                            _text(record.get("summary")), 240
+                        ),
+                    }
+                )
+                if value == "less_often" and reason:
+                    suppressed[reason] = (
+                        datetime.now(timezone.utc).astimezone() + timedelta(hours=24)
+                    ).isoformat(timespec="seconds")
+            state["feedback"] = feedback[-100:]
+            state["suppressed_until"] = suppressed
+
+        self.store.update_learning_state(merge)
+        self.store.mark_feedback_processed(max(index for index, _ in pending))
 
     def append_action(self, action: str, payload: Mapping[str, object] | None = None) -> None:
         """Append a user action for Deepmate to process."""
@@ -272,7 +357,7 @@ class PetBackendService:
             suggestion = generate_learning_suggestion(
                 fresh,
                 interest_tags=tags,
-                current_work_summary=self.current_event.summary,
+                current_work_summary="",
                 profile=self.profile,
                 provider=self.provider,
                 model=self.model,
@@ -284,15 +369,31 @@ class PetBackendService:
                 self._learning_failure_count = 0
                 return
             shown_urls.add(suggestion.url)
-            state["shown_urls"] = list(shown_urls)[-100:]
-            state["last_suggestion"] = {
+            last_suggestion = {
                 "title": suggestion.title,
                 "url": suggestion.url,
                 "summary": suggestion.summary,
                 "source": suggestion.source,
                 "shown_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             }
-            self.store.save_learning_state(state)
+
+            def merge_learning_state(latest: dict[str, object]) -> None:
+                raw_latest_urls = latest.get("shown_urls")
+                latest_urls = (
+                    [
+                        _text(item)
+                        for item in raw_latest_urls
+                        if isinstance(item, str) and _text(item)
+                    ]
+                    if isinstance(raw_latest_urls, list)
+                    else []
+                )
+                latest_urls = [item for item in latest_urls if item != suggestion.url]
+                latest_urls.append(suggestion.url)
+                latest["shown_urls"] = latest_urls[-100:]
+                latest["last_suggestion"] = last_suggestion
+
+            self.store.update_learning_state(merge_learning_state)
             text = bounded_pet_text(f"可以看看：{suggestion.summary} {suggestion.url}", 180)
             self._learning_failure_count = 0
             bubble = {
@@ -514,7 +615,15 @@ def _copy_cache_key(event: PetEvent, profile: PetProfile) -> str:
 def _learning_sources(state: Mapping[str, object]) -> tuple[str, ...]:
     raw = state.get("sources")
     if isinstance(raw, list):
-        return tuple(_text(item) for item in raw if _text(item))
+        sources: list[str] = []
+        for item in raw:
+            source = _text(item)
+            if not source or source in sources:
+                continue
+            sources.append(source)
+            if len(sources) >= MAX_LEARNING_SOURCES:
+                break
+        return tuple(sources)
     return ()
 
 
@@ -543,6 +652,11 @@ def _profile_muted_until_active(profile: PetProfile) -> bool:
     if muted_until is None:
         return False
     return muted_until > datetime.now(timezone.utc).astimezone()
+
+
+def _timestamp_is_future(value: str) -> bool:
+    timestamp = _parse_datetime(value)
+    return timestamp is not None and timestamp > datetime.now(timezone.utc).astimezone()
 
 
 def _care_reason(
@@ -649,3 +763,13 @@ def _bool(value: object, fallback: bool) -> bool:
         if clean in {"0", "false", "no", "off"}:
             return False
     return fallback
+
+
+def _positive_int(value: object, fallback: int) -> int:
+    if isinstance(value, bool):
+        return fallback
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback

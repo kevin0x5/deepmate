@@ -106,6 +106,64 @@ class PetCompanionTests(unittest.TestCase):
             store.mark_actions_processed(pending[0][0])
             self.assertEqual(store.pending_actions(), ())
 
+    def test_action_cursor_persists_byte_offset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PetStateStore.in_data_dir(tmp)
+            for index in range(2):
+                store.append_action(
+                    PetUserAction(
+                        action="open_current_work",
+                        created_at=f"2026-07-19T01:0{index}:00+00:00",
+                        payload={"session_id": f"session_{index}"},
+                    )
+                )
+            first = store.pending_actions(limit=1)
+            store.mark_actions_processed(first[0][0])
+            cursor = json.loads(store.actions_state_path.read_text(encoding="utf-8"))
+
+            remaining = PetStateStore.in_data_dir(tmp).pending_actions()
+
+            self.assertGreater(cursor["processed_offset"], 0)
+            self.assertEqual([index for index, _ in remaining], [2])
+
+    def test_legacy_action_cursor_is_migrated_without_replaying_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PetStateStore.in_data_dir(tmp)
+            for index in range(3):
+                store.append_action(
+                    PetUserAction(
+                        action="open_current_work",
+                        created_at=f"2026-07-19T02:0{index}:00+00:00",
+                        payload={"session_id": f"session_{index}"},
+                    )
+                )
+            store.actions_state_path.write_text(
+                json.dumps({"processed_count": 2}) + "\n",
+                encoding="utf-8",
+            )
+
+            pending = PetStateStore.in_data_dir(tmp).pending_actions()
+
+            self.assertEqual([index for index, _ in pending], [3])
+            self.assertEqual(pending[0][1].payload["session_id"], "session_2")
+
+    def test_event_log_rotates_at_bounded_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PetStateStore.in_data_dir(tmp)
+            event = event_for_turn_progress(
+                workspace=tmp,
+                session_id="session_1",
+                title="Bounded log",
+                summary="x" * 700,
+            )
+            with patch("deepmate.pet.state.MAX_PET_EVENT_LOG_BYTES", 1024):
+                for index in range(5):
+                    store.append_event(replace(event, event_id=f"event_{index}"))
+
+            self.assertTrue(store.events_path.exists())
+            self.assertTrue(store.events_path.with_name("events.jsonl.1").exists())
+            self.assertLessEqual(store.events_path.stat().st_size, 1024)
+
     def test_action_append_does_not_reenter_jsonl_file_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = PetStateStore.in_data_dir(tmp)
@@ -273,15 +331,16 @@ class PetCompanionTests(unittest.TestCase):
         self.assertIn("backgroundColor: '#00000000'", main_js)
         self.assertIn("alwaysOnTop: true", main_js)
         self.assertIn("skipTaskbar: true", main_js)
+        self.assertIn("sandbox: true", main_js)
         self.assertIn("setIgnoreMouseEvents", main_js)
         self.assertIn("bubbleWindow", main_js)
         self.assertIn("hudWindow", main_js)
         self.assertIn("pet-renderer-ready", main_js)
         self.assertIn("const HUD_HEIGHT = 390", main_js)
         self.assertIn("fs.renameSync(temporary, file)", main_js)
-        self.assertIn("pet_learning_state.json", main_js)
+        self.assertIn("feedback.jsonl", main_js)
         self.assertIn("recordFeedback(value)", main_js)
-        self.assertIn("suppressed_until", main_js)
+        self.assertIn("appendFeedback(record)", main_js)
         self.assertIn("refs: Array.isArray(state.refs)", main_js)
         self.assertIn("hx = clamp(hx", main_js)
         self.assertIn("ready(surface)", preload_js)
@@ -305,7 +364,7 @@ class PetCompanionTests(unittest.TestCase):
         self.assertIn("muted_until", main_js)
         self.assertIn("...backendProfile,\n    ...localProfile", main_js)
         self.assertIn(
-            "muted_until: localProfile.muted_until || backendProfile.muted_until",
+            "muted_until: host.muted_until || localProfile.muted_until || backendProfile.muted_until",
             main_js,
         )
         self.assertIn("profile,", main_js)
@@ -427,6 +486,26 @@ class PetCompanionTests(unittest.TestCase):
             captured_env.get("ELECTRON_MIRROR"),
             "https://mirror.example/electron/",
         )
+
+    def test_pet_frontend_process_does_not_inherit_secret_environment(self) -> None:
+        from deepmate.pet.electron_host import _electron_env
+
+        with patch.dict(
+            "os.environ",
+            {
+                "PATH": "/usr/bin",
+                "DEEPMATE_TEST_API_KEY": "fake-key",
+                "DEEPMATE_TEST_REMOTE_SECRET": "fake-secret",
+                "CUSTOM_PRIVATE_VALUE": "private-placeholder",
+            },
+            clear=True,
+        ):
+            env = _electron_env()
+
+        self.assertEqual(env.get("PATH"), "/usr/bin")
+        self.assertNotIn("DEEPMATE_TEST_API_KEY", env)
+        self.assertNotIn("DEEPMATE_TEST_REMOTE_SECRET", env)
+        self.assertNotIn("CUSTOM_PRIVATE_VALUE", env)
 
     def test_copy_generation_uses_fallback_without_provider(self) -> None:
         profile = default_pet_profile("penguin")
@@ -555,7 +634,68 @@ class PetCompanionTests(unittest.TestCase):
             self.assertIsNotNone(first)
             self.assertIsNotNone(second)
             self.assertEqual(first.record["kind"], "care.reminder")
-            self.assertEqual(second.record["kind"], "task.progress")
+            self.assertEqual(second.record["kind"], "care.reminder")
+            service._active_override_expires_at = 0
+            third = service.tick()
+            self.assertEqual(third.record["kind"], "task.progress")
+
+    def test_learning_bubble_survives_ticks_until_its_duration_expires(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PetStateStore.in_data_dir(tmp)
+            event = event_for_turn_progress(
+                workspace=tmp,
+                session_id="sess_1",
+                title="Current work",
+                summary="Still running.",
+            )
+            store.save_current_state(event)
+            service = PetBackendService(store, poll_seconds=0.2)
+            service.tick()
+            service.publish_event(
+                event,
+                bubble_override={
+                    "text": "A useful local suggestion.",
+                    "show": True,
+                    "hold": False,
+                    "reason": "learning_suggestion",
+                    "priority": 40,
+                    "duration_ms": 16_000,
+                },
+            )
+
+            active = service.tick()
+            service._active_override_expires_at = 0
+            expired = service.tick()
+
+            self.assertEqual(active.record["bubble"]["reason"], "learning_suggestion")
+            self.assertEqual(expired.record["bubble"]["reason"], "important_progress")
+
+    def test_frontend_feedback_is_merged_by_python_single_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PetStateStore.in_data_dir(tmp)
+            store.feedback_path.parent.mkdir(parents=True)
+            store.feedback_path.write_text(
+                json.dumps(
+                    {
+                        "value": "less_often",
+                        "created_at": "2026-07-19T01:00:00+00:00",
+                        "event_id": "event_1",
+                        "kind": "task.progress",
+                        "reason": "learning_suggestion",
+                        "title": "Current work",
+                        "summary": "A short summary.",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            PetBackendService(store, poll_seconds=0.2).tick()
+
+            learning_state = store.load_learning_state()
+            self.assertEqual(learning_state["feedback"][0]["value"], "less_often")
+            self.assertIn("learning_suggestion", learning_state["suppressed_until"])
+            self.assertEqual(store.pending_feedback(), ())
 
     def test_pet_care_uses_continuous_work_start_across_progress_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -621,6 +761,42 @@ class PetCompanionTests(unittest.TestCase):
             self.assertNotIn("last_suggestion", learning_state)
             self.assertNotIn("shown_urls", learning_state)
             self.assertEqual(store.load_ui_state(), {})
+
+    def test_learning_worker_sends_tags_without_raw_work_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PetStateStore.in_data_dir(tmp)
+            store.save_profile(replace(default_pet_profile("cat"), learning_mode="low"))
+            store.save_learning_state({"sources": ["https://example.test/feed"]})
+            store.save_current_state(
+                event_for_turn_progress(
+                    workspace=tmp,
+                    session_id="session_1",
+                    title="MCP context",
+                    summary="private task details",
+                )
+            )
+            service = PetBackendService(store, poll_seconds=0.2)
+            service.tick()
+            with (
+                patch(
+                    "deepmate.pet.service.fetch_learning_candidates",
+                    return_value=(
+                        LearningCandidate(
+                            title="MCP patterns",
+                            url="https://example.test/mcp",
+                            summary="Useful context protocol notes.",
+                        ),
+                    ),
+                ),
+                patch(
+                    "deepmate.pet.service.generate_learning_suggestion",
+                    return_value=None,
+                ) as generate,
+            ):
+                service._learning_worker()
+
+            self.assertEqual(generate.call_args.kwargs["current_work_summary"], "")
+            self.assertIn("mcp", generate.call_args.kwargs["interest_tags"])
 
     def test_learning_feedback_suppression_blocks_learning_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -819,6 +995,8 @@ class PetCompanionTests(unittest.TestCase):
             _learning_sources({"sources": ["https://example.com/", ""]}),
             ("https://example.com/",),
         )
+        sources = [f"https://source-{index}.example/" for index in range(20)]
+        self.assertEqual(len(_learning_sources({"sources": sources})), 8)
 
     def test_pet_only_cli_commands_do_not_require_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

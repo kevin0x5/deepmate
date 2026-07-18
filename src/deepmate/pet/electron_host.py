@@ -12,9 +12,36 @@ from pathlib import Path
 from deepmate.pet.service import PetBackendService
 from deepmate.pet.state import PetStateStore
 from deepmate.providers import ModelProvider
+from deepmate.runtime.safety import safe_environment
 
 PET_UI_DIR = Path(__file__).resolve().parents[1] / "pet_ui"
 PET_RUNTIME_RELATIVE_DIR = Path("pet") / "ui_runtime"
+PET_FRONTEND_ENV_NAMES = {
+    "APPDATA",
+    "COLORTERM",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DISPLAY",
+    "HOME",
+    "LANG",
+    "LOCALAPPDATA",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "SYSTEMROOT",
+    "TEMP",
+    "TERM",
+    "TMP",
+    "TMPDIR",
+    "USER",
+    "USERPROFILE",
+    "WAYLAND_DISPLAY",
+    "WINDIR",
+    "XAUTHORITY",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_DATA_DIRS",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_TYPE",
+}
 
 
 def run_pet_host(
@@ -173,9 +200,13 @@ def _local_electron_binary(ui_dir: Path) -> Path | None:
 
 
 def _electron_env() -> dict[str, str]:
-    env = dict(os.environ)
-    env.setdefault("ELECTRON_DISABLE_SECURITY_WARNINGS", "true")
-    return env
+    """Return a frontend environment without provider or remote credentials."""
+    source = safe_environment()
+    return {
+        key: value
+        for key, value in source.items()
+        if key.upper() in PET_FRONTEND_ENV_NAMES or key.upper().startswith("LC_")
+    }
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:

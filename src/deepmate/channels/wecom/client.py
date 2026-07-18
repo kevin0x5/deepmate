@@ -43,6 +43,7 @@ class WeComWsClient:
     def __init__(self, config: WeComClientConfig) -> None:
         self.config = config
         self._sock: ssl.SSLSocket | socket.socket | None = None
+        self._recv_buffer = bytearray()
         self._send_lock = threading.Lock()
 
     def connect(self) -> None:
@@ -57,34 +58,50 @@ class WeComWsClient:
         if parsed.query:
             path += f"?{parsed.query}"
         raw = socket.create_connection((host, port), timeout=30)
-        if parsed.scheme == "wss":
-            sock: ssl.SSLSocket | socket.socket = ssl.create_default_context().wrap_socket(
-                raw,
-                server_hostname=host,
-            )
-        else:
-            sock = raw
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        headers = [
-            f"GET {path} HTTP/1.1",
-            f"Host: {host}",
-            "Upgrade: websocket",
-            "Connection: Upgrade",
-            f"Sec-WebSocket-Key: {key}",
-            "Sec-WebSocket-Version: 13",
-            "",
-            "",
-        ]
-        sock.sendall("\r\n".join(headers).encode("ascii"))
-        response = _read_http_response(sock)
-        expected_accept = base64.b64encode(
-            hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii")).digest()
-        ).decode("ascii")
-        if " 101 " not in response.splitlines()[0]:
-            raise RuntimeError(f"WeCom websocket upgrade failed: {response.splitlines()[0]}")
-        if f"sec-websocket-accept: {expected_accept.lower()}" not in response.lower():
-            raise RuntimeError("WeCom websocket upgrade returned invalid accept key")
-        self._sock = sock
+        sock: ssl.SSLSocket | socket.socket = raw
+        try:
+            if parsed.scheme == "wss":
+                sock = ssl.create_default_context().wrap_socket(
+                    raw,
+                    server_hostname=host,
+                )
+            key = base64.b64encode(os.urandom(16)).decode("ascii")
+            headers = [
+                f"GET {path} HTTP/1.1",
+                f"Host: {_host_header(host, port, parsed.scheme)}",
+                "Upgrade: websocket",
+                "Connection: Upgrade",
+                f"Sec-WebSocket-Key: {key}",
+                "Sec-WebSocket-Version: 13",
+                "",
+                "",
+            ]
+            sock.sendall("\r\n".join(headers).encode("ascii"))
+            response, buffered = _read_http_response(sock)
+            response_lines = response.splitlines()
+            if not response_lines:
+                raise RuntimeError("WeCom websocket upgrade returned an empty response")
+            status_line = response_lines[0]
+            status_parts = status_line.split()
+            if len(status_parts) < 2 or status_parts[1] != "101":
+                raise RuntimeError(f"WeCom websocket upgrade failed: {status_line}")
+            expected_accept = base64.b64encode(
+                hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii")).digest()
+            ).decode("ascii")
+            if f"sec-websocket-accept: {expected_accept.lower()}" not in response.lower():
+                raise RuntimeError("WeCom websocket upgrade returned invalid accept key")
+            self._sock = sock
+            self._recv_buffer = bytearray(buffered)
+        except Exception:
+            try:
+                sock.close()
+            finally:
+                if sock is not raw:
+                    try:
+                        raw.close()
+                    except OSError:
+                        pass
+            raise
 
     def subscribe(self) -> None:
         self.send_json(
@@ -131,6 +148,7 @@ class WeComWsClient:
         with self._send_lock:
             sock = self._sock
             self._sock = None
+            self._recv_buffer.clear()
         if sock is None:
             return
         try:
@@ -163,7 +181,7 @@ class WeComWsClient:
         total = 0
         fragmented_opcode: int | None = None
         while True:
-            first = _recv_exact(self._sock, 2)
+            first = _recv_exact(self._sock, 2, self._recv_buffer)
             fin = bool(first[0] & 0x80)
             if first[0] & 0x70:
                 raise WeComProtocolError(
@@ -171,18 +189,26 @@ class WeComWsClient:
                 )
             opcode = first[0] & 0x0F
             masked = bool(first[1] & 0x80)
+            if masked:
+                raise WeComProtocolError("WeCom websocket server frame must not be masked")
             length = first[1] & 0x7F
             if length == 126:
-                length = struct.unpack("!H", _recv_exact(self._sock, 2))[0]
+                length = struct.unpack(
+                    "!H",
+                    _recv_exact(self._sock, 2, self._recv_buffer),
+                )[0]
             elif length == 127:
-                length = struct.unpack("!Q", _recv_exact(self._sock, 8))[0]
+                length = struct.unpack(
+                    "!Q",
+                    _recv_exact(self._sock, 8, self._recv_buffer),
+                )[0]
             if length > MAX_WEBSOCKET_FRAME_BYTES:
                 raise WeComProtocolError(
                     "WeCom websocket frame is too large "
                     f"({length} bytes > {MAX_WEBSOCKET_FRAME_BYTES})"
                 )
-            mask = _recv_exact(self._sock, 4) if masked else b""
-            payload = _recv_exact(self._sock, length)
+            mask = b""
+            payload = _recv_exact(self._sock, length, self._recv_buffer)
             if masked:
                 payload = bytes(
                     byte ^ mask[index % 4] for index, byte in enumerate(payload)
@@ -229,23 +255,40 @@ class WeComWsClient:
                 )
 
 
-def _read_http_response(sock: socket.socket) -> str:
+def _read_http_response(sock: socket.socket) -> tuple[str, bytes]:
     data = bytearray()
-    while b"\r\n\r\n" not in data:
+    marker = b"\r\n\r\n"
+    while marker not in data:
         chunk = sock.recv(4096)
         if not chunk:
             break
         data.extend(chunk)
         if len(data) > 64_000:
             raise RuntimeError("websocket upgrade response is too large")
-    return bytes(data).decode("iso-8859-1", errors="replace")
+    header, separator, remainder = bytes(data).partition(marker)
+    response = header + separator if separator else header
+    return response.decode("iso-8859-1", errors="replace"), remainder
 
 
-def _recv_exact(sock: socket.socket, size: int) -> bytes:
+def _recv_exact(
+    sock: socket.socket,
+    size: int,
+    buffered: bytearray | None = None,
+) -> bytes:
     data = bytearray()
+    if buffered:
+        take = min(size, len(buffered))
+        data.extend(buffered[:take])
+        del buffered[:take]
     while len(data) < size:
         chunk = sock.recv(size - len(data))
         if not chunk:
             raise EOFError("websocket connection closed")
         data.extend(chunk)
     return bytes(data)
+
+
+def _host_header(host: str, port: int, scheme: str) -> str:
+    display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    default_port = 443 if scheme == "wss" else 80
+    return display_host if port == default_port else f"{display_host}:{port}"

@@ -87,3 +87,40 @@ class JsonlWriter:
                     file.write(line)
                     file.flush()
                     os.fsync(file.fileno())
+
+    def append_bounded(
+        self,
+        record: dict[str, Any],
+        *,
+        max_bytes: int,
+        backups: int = 2,
+    ) -> None:
+        """Append one record and rotate before exceeding a bounded log size."""
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        encoded_size = len(line.encode("utf-8"))
+        size_limit = max(1024, int(max_bytes))
+        backup_count = max(1, int(backups))
+        with self._lock:
+            with file_lock(self.path):
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    current_size = self.path.stat().st_size
+                except OSError:
+                    current_size = 0
+                if current_size and current_size + encoded_size > size_limit:
+                    oldest = self.path.with_name(f"{self.path.name}.{backup_count}")
+                    oldest.unlink(missing_ok=True)
+                    for index in range(backup_count - 1, 0, -1):
+                        source = self.path.with_name(f"{self.path.name}.{index}")
+                        target = self.path.with_name(f"{self.path.name}.{index + 1}")
+                        if source.exists():
+                            os.replace(source, target)
+                    if self.path.exists():
+                        os.replace(
+                            self.path,
+                            self.path.with_name(f"{self.path.name}.1"),
+                        )
+                with self.path.open("a", encoding="utf-8") as file:
+                    file.write(line)
+                    file.flush()
+                    os.fsync(file.fileno())

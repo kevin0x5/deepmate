@@ -90,10 +90,6 @@ function petProfilePath() {
   return path.join(petDir, 'pet_profile.json');
 }
 
-function petLearningStatePath() {
-  return path.join(petDir, 'pet_learning_state.json');
-}
-
 function uiStatePath() {
   return path.join(petDir, 'ui_state.json');
 }
@@ -104,14 +100,6 @@ function loadHostState() {
 
 function loadProfile() {
   return readJson(petProfilePath(), {});
-}
-
-function saveProfile(extra = {}) {
-  const current = loadProfile();
-  writeJson(petProfilePath(), {
-    ...current,
-    ...extra
-  });
 }
 
 function saveHostState(extra = {}) {
@@ -151,7 +139,7 @@ function windowOptions(width, height, extra = {}) {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       ...(extra.webPreferences || {})
     }
   };
@@ -307,7 +295,7 @@ function mergeLocalState(state) {
   const profile = {
     ...backendProfile,
     ...localProfile,
-    muted_until: localProfile.muted_until || backendProfile.muted_until
+    muted_until: host.muted_until || localProfile.muted_until || backendProfile.muted_until
   };
   const timedMuted = mutedUntilActive(profile.muted_until);
   return {
@@ -446,7 +434,11 @@ function toggleHud() {
 
 function showMenu() {
   const host = loadHostState();
-  const muted = Boolean(host.muted || mutedUntilActive(loadProfile().muted_until));
+  const muted = Boolean(
+    host.muted
+    || mutedUntilActive(host.muted_until)
+    || mutedUntilActive(loadProfile().muted_until)
+  );
   const mini = Boolean(host.mini || host.collapsed);
   const menu = Menu.buildFromTemplate([
     {
@@ -516,10 +508,13 @@ function setMini(enabled) {
 
 function toggleMuted() {
   const host = loadHostState();
-  const muted = Boolean(host.muted || mutedUntilActive(loadProfile().muted_until));
+  const muted = Boolean(
+    host.muted
+    || mutedUntilActive(host.muted_until)
+    || mutedUntilActive(loadProfile().muted_until)
+  );
   if (muted) {
-    saveHostState({ muted: false });
-    saveProfile({ muted_until: '' });
+    saveHostState({ muted: false, muted_until: '' });
   } else {
     setTimedMuteHours(1);
   }
@@ -534,8 +529,19 @@ function toggleQuietOneHour() {
 
 function setTimedMuteHours(hours) {
   const durationMs = Math.max(1, Number(hours) || 1) * 60 * 60 * 1000;
-  saveProfile({ muted_until: new Date(Date.now() + durationMs).toISOString() });
-  saveHostState({ muted: false });
+  saveHostState({
+    muted: false,
+    muted_until: new Date(Date.now() + durationMs).toISOString()
+  });
+}
+
+function appendFeedback(payload) {
+  fs.mkdirSync(petDir, { recursive: true });
+  const record = {
+    ...payload,
+    created_at: new Date().toISOString()
+  };
+  fs.appendFileSync(path.join(petDir, 'feedback.jsonl'), JSON.stringify(record) + '\n', 'utf8');
 }
 
 function recordFeedback(value) {
@@ -545,34 +551,13 @@ function recordFeedback(value) {
   const bubble = state.bubble || {};
   const display = state.display || {};
   const reason = String(bubble.reason || display.reason || state.kind || '').trim();
-  const learningState = readJson(petLearningStatePath(), {});
-  const existingFeedback = Array.isArray(learningState.feedback)
-    ? learningState.feedback
-    : [];
   const record = {
     value: clean,
-    created_at: new Date().toISOString(),
     event_id: String(state.event_id || ''),
     kind: String(state.kind || ''),
-    reason,
-    title: String(state.title || ''),
-    summary: String(state.summary || '').slice(0, 240)
+    reason
   };
-  const nextState = {
-    ...learningState,
-    feedback: existingFeedback.concat(record).slice(-100)
-  };
-  if (clean === 'less_often' && reason) {
-    const existingSuppression =
-      learningState.suppressed_until && typeof learningState.suppressed_until === 'object'
-        ? learningState.suppressed_until
-        : {};
-    nextState.suppressed_until = {
-      ...existingSuppression,
-      [reason]: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-    };
-  }
-  writeJson(petLearningStatePath(), nextState);
+  appendFeedback(record);
   showBubble({
     bubble: {
       text: clean === 'useful' ? '已记录：这个提醒有用。' : '已记录：同类提醒会减少。',

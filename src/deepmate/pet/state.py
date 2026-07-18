@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,8 +18,12 @@ PET_CURRENT_STATE_FILE = "current_state.json"
 PET_EVENTS_FILE = "events.jsonl"
 PET_ACTIONS_FILE = "actions.jsonl"
 PET_ACTIONS_STATE_FILE = "actions_state.json"
+PET_FEEDBACK_FILE = "feedback.jsonl"
+PET_FEEDBACK_STATE_FILE = "feedback_state.json"
 PET_LEARNING_STATE_FILE = "pet_learning_state.json"
 PET_COPY_CACHE_FILE = "pet_copy_cache.json"
+MAX_PET_EVENT_LOG_BYTES = 5_000_000
+PET_EVENT_LOG_BACKUPS = 3
 
 PET_PRESETS: Mapping[str, tuple[str, str, str]] = {
     "dog": ("dog-happy", "dog", "happy"),
@@ -120,6 +124,8 @@ class PetStateStore:
 
     def __init__(self, data_dir: str | Path) -> None:
         self.root = Path(data_dir) / "pet"
+        self._pending_action_offsets: dict[int, int] = {}
+        self._pending_feedback_offsets: dict[int, int] = {}
 
     @classmethod
     def in_data_dir(cls, data_dir: str | Path) -> "PetStateStore":
@@ -153,6 +159,14 @@ class PetStateStore:
     @property
     def actions_state_path(self) -> Path:
         return self.root / PET_ACTIONS_STATE_FILE
+
+    @property
+    def feedback_path(self) -> Path:
+        return self.root / PET_FEEDBACK_FILE
+
+    @property
+    def feedback_state_path(self) -> Path:
+        return self.root / PET_FEEDBACK_STATE_FILE
 
     @property
     def learning_state_path(self) -> Path:
@@ -196,7 +210,11 @@ class PetStateStore:
         ready = event.normalized()
         if not ready.is_ready():
             return
-        JsonlWriter(self.events_path).append(ready.to_record())
+        JsonlWriter(self.events_path).append_bounded(
+            ready.to_record(),
+            max_bytes=MAX_PET_EVENT_LOG_BYTES,
+            backups=PET_EVENT_LOG_BACKUPS,
+        )
 
     def append_action(self, action: PetUserAction) -> None:
         """Append one user action from the pet host."""
@@ -206,24 +224,38 @@ class PetStateStore:
 
     def pending_actions(self, *, limit: int = 20) -> tuple[tuple[int, PetUserAction], ...]:
         """Return unprocessed user actions with their 1-based JSONL line indexes."""
-        cursor = _int(_read_json_object(self.actions_state_path).get("processed_count"), 0)
+        cursor_state = _read_json_object(self.actions_state_path)
+        cursor = _int(cursor_state.get("processed_count"), 0)
+        offset = _int(cursor_state.get("processed_offset"), 0)
         if not self.actions_path.exists():
             return ()
         pending: list[tuple[int, PetUserAction]] = []
+        self._pending_action_offsets = {}
         try:
-            with self.actions_path.open(encoding="utf-8") as file:
-                for index, line in enumerate(file, start=1):
-                    if index <= cursor:
-                        continue
+            size = self.actions_path.stat().st_size
+            if cursor > 0 and offset == 0:
+                offset = _byte_offset_after_lines(self.actions_path, cursor)
+            if offset < 0 or offset > size:
+                cursor = 0
+                offset = 0
+            with self.actions_path.open("rb") as file:
+                file.seek(offset)
+                index = cursor
+                while True:
+                    raw_line = file.readline()
+                    if not raw_line:
+                        break
+                    index += 1
                     try:
-                        payload = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+                        payload = json.loads(raw_line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        payload = {"action": "invalid"}
                     if not isinstance(payload, Mapping):
-                        continue
+                        payload = {"action": "invalid"}
                     action = PetUserAction.from_record(payload)
                     if action.action.strip():
                         pending.append((index, action))
+                        self._pending_action_offsets[index] = file.tell()
                     if len(pending) >= max(1, limit):
                         break
         except OSError:
@@ -234,14 +266,23 @@ class PetStateStore:
         """Record how far Deepmate has consumed actions.jsonl."""
         if processed_count <= 0:
             return
-        state = _read_json_object(self.actions_state_path)
-        current = _int(state.get("processed_count"), 0)
-        if processed_count <= current:
-            return
         with file_lock(self.actions_state_path):
+            state = _read_json_object(self.actions_state_path)
+            current = _int(state.get("processed_count"), 0)
+            if processed_count <= current:
+                return
+            processed_offset = self._pending_action_offsets.get(processed_count)
+            if processed_offset is None:
+                processed_offset = _byte_offset_after_lines(
+                    self.actions_path,
+                    processed_count,
+                )
             atomic_write_json(
                 self.actions_state_path,
-                {"processed_count": processed_count},
+                {
+                    "processed_count": processed_count,
+                    "processed_offset": processed_offset,
+                },
             )
 
     def load_pet_state(self) -> dict[str, object]:
@@ -270,6 +311,77 @@ class PetStateStore:
         """Persist learning-mode feedback and cache state."""
         with file_lock(self.learning_state_path):
             atomic_write_json(self.learning_state_path, dict(state))
+
+    def update_learning_state(
+        self,
+        updater: Callable[[dict[str, object]], None],
+    ) -> dict[str, object]:
+        """Update learning state atomically without clobbering concurrent fields."""
+        with file_lock(self.learning_state_path):
+            state = _read_json_object(self.learning_state_path)
+            updater(state)
+            atomic_write_json(self.learning_state_path, state)
+            return state
+
+    def pending_feedback(self, *, limit: int = 20) -> tuple[tuple[int, dict[str, object]], ...]:
+        """Return frontend feedback records not yet merged into learning state."""
+        cursor_state = _read_json_object(self.feedback_state_path)
+        cursor = _int(cursor_state.get("processed_count"), 0)
+        offset = _int(cursor_state.get("processed_offset"), 0)
+        if not self.feedback_path.exists():
+            return ()
+        pending: list[tuple[int, dict[str, object]]] = []
+        self._pending_feedback_offsets = {}
+        try:
+            size = self.feedback_path.stat().st_size
+            if cursor > 0 and offset == 0:
+                offset = _byte_offset_after_lines(self.feedback_path, cursor)
+            if offset < 0 or offset > size:
+                cursor = 0
+                offset = 0
+            with self.feedback_path.open("rb") as file:
+                file.seek(offset)
+                index = cursor
+                while True:
+                    raw_line = file.readline()
+                    if not raw_line:
+                        break
+                    index += 1
+                    try:
+                        payload = json.loads(raw_line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        payload = {}
+                    if isinstance(payload, dict):
+                        pending.append((index, payload))
+                        self._pending_feedback_offsets[index] = file.tell()
+                    if len(pending) >= max(1, limit):
+                        break
+        except OSError:
+            return ()
+        return tuple(pending)
+
+    def mark_feedback_processed(self, processed_count: int) -> None:
+        """Advance the independent frontend-feedback cursor."""
+        if processed_count <= 0:
+            return
+        with file_lock(self.feedback_state_path):
+            state = _read_json_object(self.feedback_state_path)
+            current = _int(state.get("processed_count"), 0)
+            if processed_count <= current:
+                return
+            processed_offset = self._pending_feedback_offsets.get(processed_count)
+            if processed_offset is None:
+                processed_offset = _byte_offset_after_lines(
+                    self.feedback_path,
+                    processed_count,
+                )
+            atomic_write_json(
+                self.feedback_state_path,
+                {
+                    "processed_count": processed_count,
+                    "processed_offset": processed_offset,
+                },
+            )
 
     def load_copy_cache(self) -> dict[str, object]:
         """Load cached visible pet copy."""
@@ -366,3 +478,19 @@ def _int(value: object, fallback: int) -> int:
         except ValueError:
             return fallback
     return fallback
+
+
+def _byte_offset_after_lines(path: Path, line_count: int) -> int:
+    if line_count <= 0:
+        return 0
+    offset = 0
+    try:
+        with path.open("rb") as file:
+            for _ in range(line_count):
+                line = file.readline()
+                if not line:
+                    break
+                offset = file.tell()
+    except OSError:
+        return 0
+    return offset
