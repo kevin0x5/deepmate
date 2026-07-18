@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import unittest
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
 from deepmate.local import (
+    LocalModelCancellationToken,
     LocalModelInstallResult,
     LocalModelStateStore,
     OllamaLocalRuntime,
@@ -204,7 +206,7 @@ class LocalRuntimeTests(unittest.TestCase):
         self.assertTrue(any(item.stage == "verifying" for item in progress))
         start_server.assert_called_once()
 
-    def test_prepare_model_allows_installed_model_when_health_check_is_inconclusive(self) -> None:
+    def test_prepare_model_fails_closed_when_installed_model_health_check_fails(self) -> None:
         preset = local_model_by_id("qwen3-local")
         self.assertIsNotNone(preset)
         runtime = OllamaLocalRuntime()
@@ -234,8 +236,8 @@ class LocalRuntimeTests(unittest.TestCase):
         ):
             result = runtime.prepare_model(preset)
 
-        self.assertTrue(result.ok)
-        self.assertIn("Ollama", result.message)
+        self.assertFalse(result.ok)
+        self.assertIn("连续两次验证失败", result.message)
         start_server.assert_called_once()
 
     def test_pull_timeout_kills_and_waits_for_process(self) -> None:
@@ -244,12 +246,15 @@ class LocalRuntimeTests(unittest.TestCase):
 
         class Stdout:
             closed = False
+            released = threading.Event()
 
             def readline(self):
+                self.released.wait()
                 return ""
 
             def close(self):
                 self.closed = True
+                self.released.set()
 
         class Process:
             stdout = Stdout()
@@ -322,6 +327,159 @@ class LocalRuntimeTests(unittest.TestCase):
         self.assertEqual(saved.model_id, "qwen3-local")
         self.assertEqual(saved.status, "ready")
         self.assertEqual(saved.stage, "ready")
+
+    def test_local_model_state_concurrent_saves_remain_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalModelStateStore(Path(tmp))
+            failures: list[Exception] = []
+
+            def save(index: int) -> None:
+                try:
+                    store.record(
+                        model_id=f"model-{index}",
+                        stage="checking",
+                        message=f"attempt {index}",
+                    )
+                except Exception as exc:  # pragma: no cover - assertion captures it.
+                    failures.append(exc)
+
+            workers = [threading.Thread(target=save, args=(index,)) for index in range(20)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join()
+
+            saved = store.load()
+
+        self.assertEqual(failures, [])
+        self.assertIsNotNone(saved)
+        self.assertTrue(saved.model_id.startswith("model-") if saved else False)
+
+    def test_disk_preflight_rejects_insufficient_space(self) -> None:
+        preset = local_model_by_id("qwen3-local")
+        self.assertIsNotNone(preset)
+        usage = type("DiskUsage", (), {"free": 128 * 1024 * 1024})()
+
+        with patch("deepmate.local.ollama.shutil.disk_usage", return_value=usage):
+            result = OllamaLocalRuntime().disk_preflight(preset)
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result.ok if result else True)
+        self.assertIn("磁盘空间不足", result.message if result else "")
+
+    def test_prepare_model_resumes_incomplete_state(self) -> None:
+        preset = local_model_by_id("qwen3-local")
+        self.assertIsNotNone(preset)
+        runtime = OllamaLocalRuntime()
+        progress = []
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalModelStateStore(Path(tmp))
+            store.record(
+                model_id=preset.id,
+                stage="downloading",
+                message="partial",
+                status="failed",
+                failure_kind="download_failed",
+            )
+            with (
+                patch.object(
+                    runtime,
+                    "ensure_ready",
+                    return_value=LocalModelStatus(True, True, True),
+                ),
+                patch.object(runtime, "has_model", return_value=True),
+                patch.object(
+                    runtime,
+                    "health_check",
+                    return_value=LocalModelInstallResult(True, preset, "verified"),
+                ),
+            ):
+                result = runtime.prepare_model(
+                    preset,
+                    progress=progress.append,
+                    state_store=store,
+                )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(progress[0].stage, "resuming")
+
+    def test_pull_cancellation_kills_process_and_preserves_resume_state(self) -> None:
+        preset = local_model_by_id("qwen3-local")
+        self.assertIsNotNone(preset)
+        token = LocalModelCancellationToken()
+        token.cancel()
+
+        class Process:
+            stdout = type(
+                "Stdout",
+                (),
+                {"readline": lambda self: "", "close": lambda self: None},
+            )()
+            returncode = None
+            killed = False
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self, timeout=None):
+                self.returncode = -9
+                return self.returncode
+
+        process = Process()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalModelStateStore(Path(tmp))
+            with patch("deepmate.local.ollama.subprocess.Popen", return_value=process):
+                result = OllamaLocalRuntime().pull(
+                    preset,
+                    state_store=store,
+                    cancellation_token=token,
+                )
+            saved = store.load()
+
+        self.assertFalse(result.ok)
+        self.assertTrue(process.killed)
+        self.assertEqual(saved.failure_kind if saved else "", "cancelled")
+
+    def test_concurrent_prepare_calls_share_completed_result(self) -> None:
+        preset = local_model_by_id("qwen3-local")
+        self.assertIsNotNone(preset)
+        runtime = OllamaLocalRuntime()
+        results = []
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalModelStateStore(Path(tmp))
+            verified = LocalModelInstallResult(True, preset, "verified")
+            pulled = LocalModelInstallResult(True, preset, "downloaded")
+            with (
+                patch.object(
+                    runtime,
+                    "ensure_ready",
+                    return_value=LocalModelStatus(True, True, True),
+                ),
+                patch.object(runtime, "has_model", side_effect=(False, True)),
+                patch.object(runtime, "disk_preflight", return_value=None),
+                patch.object(runtime, "pull", return_value=pulled) as pull,
+                patch.object(runtime, "health_check", return_value=verified) as health,
+            ):
+                workers = [
+                    threading.Thread(
+                        target=lambda: results.append(
+                            runtime.prepare_model(preset, state_store=store)
+                        )
+                    )
+                    for _ in range(2)
+                ]
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join()
+
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(result.ok for result in results))
+        pull.assert_called_once()
+        self.assertEqual(health.call_count, 2)
 
     def test_prepared_model_prefers_recommended_installed_model(self) -> None:
         runtime = OllamaLocalRuntime()

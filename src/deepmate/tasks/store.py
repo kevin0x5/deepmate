@@ -253,7 +253,7 @@ class TaskStore:
             raise DegenerateTaskPlanError(
                 "refusing to replace task/plan.md with a degenerate plan"
             )
-        with file_lock(self.plan_path):
+        with file_lock(self.task_dir / ".task-store"):
             self._write_task_text(
                 self.plan_path,
                 _ensure_trailing_newline(clean),
@@ -262,7 +262,7 @@ class TaskStore:
 
     def write_evolution(self, content: str) -> None:
         """Write task/evolution.md."""
-        with file_lock(self.evolution_path):
+        with file_lock(self.task_dir / ".task-store"):
             self._write_task_text(
                 self.evolution_path,
                 _ensure_trailing_newline(
@@ -275,7 +275,7 @@ class TaskStore:
         """Create one achievement markdown file and return its path."""
         clean = content.strip()
         digest = _content_digest(clean)
-        with file_lock(self.achievements_dir / ".achievements"):
+        with file_lock(self.task_dir / ".task-store"):
             self.achievements_dir.mkdir(parents=True, exist_ok=True)
             for path in sorted(self.achievements_dir.glob("*.md")):
                 if _content_digest(_read_text(path).strip()) == digest:
@@ -296,7 +296,7 @@ class TaskStore:
         updater: Callable[[str], str],
     ) -> bool:
         """Atomically read, update, and write task/evolution.md."""
-        with file_lock(self.evolution_path):
+        with file_lock(self.task_dir / ".task-store"):
             before = _read_text(self.evolution_path)
             after = updater(before)
             if after.strip() == before.strip():
@@ -309,6 +309,108 @@ class TaskStore:
                 operation="task.write_evolution",
             )
             return True
+
+    def apply_update(
+        self,
+        *,
+        plan_content: str = "",
+        evolution_updater: Callable[[str], str] | None = None,
+        achievement_title: str = "",
+        achievement_content: str = "",
+    ) -> tuple[Path, ...]:
+        """Apply one multi-file Task Mode update with rollback on failure."""
+        clean_plan = plan_content.strip()
+        if clean_plan and not _looks_like_real_plan(clean_plan):
+            raise DegenerateTaskPlanError(
+                "refusing to replace task/plan.md with a degenerate plan"
+            )
+        clean_achievement = achievement_content.strip()
+        with file_lock(self.task_dir / ".task-store"):
+            mutations: list[tuple[Path, str, str, bool, str]] = []
+            changed: list[Path] = []
+
+            old_plan = _read_text(self.plan_path)
+            if clean_plan and clean_plan != old_plan.strip():
+                mutations.append(
+                    (
+                        self.plan_path,
+                        _ensure_trailing_newline(clean_plan),
+                        "task.write_plan",
+                        self.plan_path.exists(),
+                        old_plan,
+                    )
+                )
+                changed.append(self.plan_path)
+
+            old_evolution = _read_text(self.evolution_path)
+            if evolution_updater is not None:
+                updated_evolution = evolution_updater(old_evolution).strip()
+                if updated_evolution != old_evolution.strip():
+                    mutations.append(
+                        (
+                            self.evolution_path,
+                            _ensure_trailing_newline(
+                                updated_evolution or default_evolution_markdown()
+                            ),
+                            "task.write_evolution",
+                            self.evolution_path.exists(),
+                            old_evolution,
+                        )
+                    )
+                    changed.append(self.evolution_path)
+
+            if clean_achievement:
+                digest = _content_digest(clean_achievement)
+                existing = next(
+                    (
+                        path
+                        for path in sorted(self.achievements_dir.glob("*.md"))
+                        if _content_digest(_read_text(path).strip()) == digest
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    changed.append(existing)
+                else:
+                    self.achievements_dir.mkdir(parents=True, exist_ok=True)
+                    slug = _slug(achievement_title) or "task-achievement"
+                    stamp = datetime.now().strftime("%Y-%m-%d")
+                    achievement_path = _unique_path(
+                        self.achievements_dir / f"{stamp}-{slug}.md"
+                    )
+                    mutations.append(
+                        (
+                            achievement_path,
+                            _ensure_trailing_newline(clean_achievement),
+                            "task.append_achievement",
+                            False,
+                            "",
+                        )
+                    )
+                    changed.append(achievement_path)
+
+            applied: list[tuple[Path, bool, str]] = []
+            try:
+                for path, content, operation, old_exists, old_content in mutations:
+                    self._write_task_text(path, content, operation=operation)
+                    applied.append((path, old_exists, old_content))
+            except Exception as exc:
+                rollback_error: OSError | None = None
+                for path, old_exists, old_content in reversed(applied):
+                    try:
+                        if old_exists:
+                            atomic_write_text(path, old_content)
+                        else:
+                            path.unlink(missing_ok=True)
+                    except OSError as restore_exc:
+                        rollback_error = rollback_error or restore_exc
+                if rollback_error is not None:
+                    raise RuntimeError(
+                        "Task Mode update failed and rollback was incomplete: "
+                        f"{rollback_error}"
+                    ) from exc
+                raise
+            return tuple(changed)
 
     def _write_task_text(self, path: Path, content: str, *, operation: str) -> None:
         if self._write_checkpoint is not None:

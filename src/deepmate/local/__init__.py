@@ -2,6 +2,7 @@
 
 from deepmate.local.ollama import (
     LocalModelInstallResult,
+    LocalModelCancellationToken,
     LocalModelProgress,
     LocalModelStatus,
     OllamaLocalRuntime,
@@ -25,6 +26,7 @@ __all__ = [
     "LOCAL_PROVIDER_BASE_URL",
     "LOCAL_PROVIDER_API_KEY",
     "LocalModelInstallResult",
+    "LocalModelCancellationToken",
     "LocalModelPreset",
     "LocalModelProgress",
     "LocalModelPrepareState",

@@ -31,6 +31,8 @@ class BehaviorHintDocument:
     size_bytes: int = 0
     sha256: str = ""
     estimated_tokens: int = 0
+    mtime_ns: int = 0
+    read_stable: bool = True
 
     def is_loaded(self) -> bool:
         """Return whether this document contributes prompt content."""
@@ -169,7 +171,22 @@ def normalize_behavior_hints(hints: tuple[str, ...]) -> tuple[str, ...]:
 def _read_behavior_hint_document(name: str, path: Path) -> BehaviorHintDocument:
     if not path.exists():
         return BehaviorHintDocument(name=name, path=path, status="missing_optional")
-    raw_content = path.read_text(encoding="utf-8")
+    before = _file_signature(path)
+    try:
+        raw_content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        after = _file_signature(path)
+        return BehaviorHintDocument(
+            name=name,
+            path=path,
+            status="unreadable_optional",
+            size_bytes=after[1] if after is not None else 0,
+            mtime_ns=after[0] if after is not None else 0,
+            read_stable=before == after,
+        )
+    after = _file_signature(path)
+    mtime_ns = after[0] if after is not None else 0
+    read_stable = before == after and after is not None
     content = raw_content.strip()
     size_bytes = len(raw_content.encode("utf-8"))
     sha256 = hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
@@ -180,6 +197,8 @@ def _read_behavior_hint_document(name: str, path: Path) -> BehaviorHintDocument:
             status="empty_optional",
             size_bytes=size_bytes,
             sha256=sha256,
+            mtime_ns=mtime_ns,
+            read_stable=read_stable,
         )
     hints = extract_behavior_hints(raw_content)
     if not hints:
@@ -190,6 +209,8 @@ def _read_behavior_hint_document(name: str, path: Path) -> BehaviorHintDocument:
             size_bytes=size_bytes,
             sha256=sha256,
             estimated_tokens=estimate_text_tokens(content),
+            mtime_ns=mtime_ns,
+            read_stable=read_stable,
         )
     rendered = "\n".join(f"- {hint}" for hint in hints)
     return BehaviorHintDocument(
@@ -200,7 +221,17 @@ def _read_behavior_hint_document(name: str, path: Path) -> BehaviorHintDocument:
         size_bytes=size_bytes,
         sha256=sha256,
         estimated_tokens=estimate_text_tokens(rendered),
+        mtime_ns=mtime_ns,
+        read_stable=read_stable,
     )
+
+
+def _file_signature(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
 
 
 def _behavior_heading_index(lines: list[str]) -> int | None:

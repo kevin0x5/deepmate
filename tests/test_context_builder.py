@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from deepmate.capabilities import CapabilitySurface, from_native_tool_schemas
 from deepmate.context import (
@@ -120,6 +121,24 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertTrue(snapshot.is_ready())
             result = build_system_context_from_snapshot(snapshot)
             self.assertIn(str(workspace), result.message.content)
+
+    def test_unreadable_context_and_behavior_paths_degrade_to_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            profile = ProfileRef(name="default", uri="profiles/default")
+            (workspace / "AGENTS.md").mkdir()
+            behavior_path = workspace / ".deepmate" / "behavior.md"
+            behavior_path.mkdir(parents=True)
+
+            snapshot = build_profile_context_snapshot(workspace=workspace, profile=profile)
+            refs = {ref.name: ref for ref in snapshot.file_refs}
+
+            self.assertTrue(snapshot.is_ready())
+            self.assertEqual(refs["workspace_rules"].status, "unreadable_required")
+            self.assertEqual(refs["workspace_behavior"].status, "unreadable_optional")
+            self.assertTrue(
+                any(warning.code == "context_file_unreadable" for warning in snapshot.warnings)
+            )
 
     def test_profile_snapshot_records_file_refs_and_hot_profile_budget(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -391,7 +410,11 @@ class ContextBuilderTests(unittest.TestCase):
             )
             snapshot = build_profile_context_snapshot(workspace=workspace, profile=profile)
 
-            self.assertEqual(detect_behavior_context_changes(snapshot), ())
+            with patch(
+                "deepmate.context.builder.read_behavior_hint_documents"
+            ) as read_documents:
+                self.assertEqual(detect_behavior_context_changes(snapshot), ())
+            read_documents.assert_not_called()
 
             behavior_path.write_text(
                 "# Behavior Hints\n\n- Updated hint.\n",
@@ -405,6 +428,38 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertEqual(changes[0].old_status, "loaded")
             self.assertEqual(changes[0].new_status, "loaded")
             self.assertNotEqual(changes[0].old_sha256, changes[0].new_sha256)
+
+    def test_context_generation_depends_on_content_not_file_mtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            profile = ProfileRef(name="default", uri="profiles/default")
+            rules = workspace / "AGENTS.md"
+            rules.write_text("Stable rules.", encoding="utf-8")
+
+            first = build_profile_context_snapshot(workspace=workspace, profile=profile)
+            rules.write_text("Stable rules.", encoding="utf-8")
+            second = build_profile_context_snapshot(workspace=workspace, profile=profile)
+
+            self.assertTrue(first.generation)
+            self.assertEqual(first.generation, second.generation)
+
+    def test_context_snapshot_retries_when_source_signatures_are_unstable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            profile = ProfileRef(name="default", uri="profiles/default")
+            (workspace / "AGENTS.md").write_text("Rules.", encoding="utf-8")
+
+            with patch(
+                "deepmate.context.builder._context_refs_are_stable",
+                side_effect=(False, True),
+            ) as stable:
+                snapshot = build_profile_context_snapshot(
+                    workspace=workspace,
+                    profile=profile,
+                )
+
+            self.assertTrue(snapshot.is_ready())
+            self.assertEqual(stable.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -145,6 +145,8 @@ def detect_behavior_context_changes(
         for ref in snapshot.file_refs
         if ref.name in BEHAVIOR_CONTEXT_FILE_NAMES
     }
+    if old_refs and all(_context_ref_signature_unchanged(ref) for ref in old_refs.values()):
+        return ()
     changes: list[ContextFileChange] = []
     for document in read_behavior_hint_documents(snapshot.workspace, snapshot.profile):
         old_ref = old_refs.get(document.name)
@@ -259,11 +261,22 @@ def _behavior_context_ref(document) -> ContextFileRef:
         size_bytes=document.size_bytes,
         sha256=document.sha256,
         estimated_tokens=document.estimated_tokens,
+        mtime_ns=document.mtime_ns,
+        read_stable=document.read_stable,
     )
 
 
 def _context_file_ref_changed(old: ContextFileRef, current: ContextFileRef) -> bool:
     return old.status != current.status or old.sha256 != current.sha256
+
+
+def _context_ref_signature_unchanged(ref: ContextFileRef) -> bool:
+    current = _file_signature(ref.path)
+    if ref.status.startswith("missing"):
+        return current is None
+    if not ref.mtime_ns:
+        return False
+    return current == (ref.mtime_ns, ref.size_bytes)
 
 
 def build_profile_context_snapshot(
@@ -276,10 +289,22 @@ def build_profile_context_snapshot(
 ) -> ProfileContextSnapshot:
     """Read workspace/profile markdown into a reusable context snapshot."""
     workspace_path = Path(workspace)
-    sections, warnings, refs, hot_profile_tokens = _read_profile_context(
-        workspace=workspace_path,
-        profile=profile,
-    )
+    for attempt in range(3):
+        sections, warnings, refs, hot_profile_tokens = _read_profile_context(
+            workspace=workspace_path,
+            profile=profile,
+        )
+        if _context_refs_are_stable(refs):
+            break
+    else:  # pragma: no cover - requires continuous concurrent file replacement.
+        warnings = (
+            *warnings,
+            ContextWarning(
+                code="context_snapshot_unstable",
+                message="context files kept changing while the snapshot was built",
+                refs=("snapshot_attempts=3",),
+            ),
+        )
     if not sections:
         # An empty workspace (no AGENTS.md/CLAUDE.md and an empty profile) still
         # needs a readable section so the snapshot is ready and a session can
@@ -308,6 +333,8 @@ def build_profile_context_snapshot(
         hot_profile_warn_tokens=max(0, hot_profile_warn_tokens),
         hot_profile_estimated_tokens=hot_profile_tokens,
         pending_refresh_reason=pending_refresh_reason.strip(),
+        extra_sections=clean_extra_sections,
+        generation=_context_generation(refs, clean_extra_sections),
     )
 
 
@@ -333,7 +360,28 @@ def _read_section(
             warning_code=warning.code,
         )
 
-    raw_content = path.read_text(encoding="utf-8")
+    before = _file_signature(path)
+    try:
+        raw_content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        after = _file_signature(path)
+        status = "unreadable_optional" if optional else "unreadable_required"
+        warning = ContextWarning(
+            code="context_file_unreadable",
+            message=f"unreadable context file: {path}",
+            refs=(str(path),),
+        )
+        return "", warning, ContextFileRef(
+            name=name,
+            path=path,
+            status=status,
+            warning_code=warning.code,
+            mtime_ns=after[0] if after is not None else 0,
+            read_stable=before == after,
+        )
+    after = _file_signature(path)
+    mtime_ns = after[0] if after is not None else 0
+    read_stable = before == after and after is not None
     content = raw_content.strip()
     size_bytes = len(raw_content.encode("utf-8"))
     sha256 = hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
@@ -347,6 +395,8 @@ def _read_section(
             size_bytes=size_bytes,
             sha256=sha256,
             estimated_tokens=0,
+            mtime_ns=mtime_ns,
+            read_stable=read_stable,
         )
         if optional:
             return "", None, ref
@@ -363,6 +413,8 @@ def _read_section(
             sha256=sha256,
             estimated_tokens=0,
             warning_code=warning.code,
+            mtime_ns=mtime_ns,
+            read_stable=read_stable,
         )
     return (
         f"<{name}>\n{content}\n</{name}>",
@@ -374,8 +426,50 @@ def _read_section(
             size_bytes=size_bytes,
             sha256=sha256,
             estimated_tokens=estimated_tokens,
+            mtime_ns=mtime_ns,
+            read_stable=read_stable,
         ),
     )
+
+
+def _file_signature(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
+def _context_refs_are_stable(refs: tuple[ContextFileRef, ...]) -> bool:
+    for ref in refs:
+        if not ref.read_stable:
+            return False
+        current = _file_signature(ref.path)
+        if ref.status.startswith("missing"):
+            if current is not None:
+                return False
+            continue
+        if ref.mtime_ns and current != (ref.mtime_ns, ref.size_bytes):
+            return False
+    return True
+
+
+def _context_generation(
+    refs: tuple[ContextFileRef, ...],
+    extra_sections: tuple[str, ...],
+) -> str:
+    digest = hashlib.sha256()
+    for ref in refs:
+        digest.update(ref.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(ref.status.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(ref.sha256.encode("ascii"))
+        digest.update(b"\0")
+    for section in extra_sections:
+        digest.update(section.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _hot_profile_budget_warnings(

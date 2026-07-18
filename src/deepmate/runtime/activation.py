@@ -61,6 +61,7 @@ class RuntimeActivation:
             ),
             hot_profile_warn_tokens=self.context_snapshot.hot_profile_warn_tokens,
             pending_refresh_reason=pending_refresh_reason,
+            extra_sections=self.context_snapshot.extra_sections,
         )
         refreshed = replace(
             self,

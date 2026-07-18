@@ -24,6 +24,7 @@ from deepmate.tasks import (
     TaskDocuments,
     TaskStage,
     TaskStore,
+    TaskUpdateResult,
     apply_task_update_result,
     generate_task_update,
     parse_task_update_response,
@@ -31,8 +32,13 @@ from deepmate.tasks import (
     should_run_task_update,
 )
 from deepmate.tasks.render import build_task_context
-from deepmate.tasks.execute import ExecuteDecision, parse_execute_evaluation
-from deepmate.tasks.store import DegenerateTaskPlanError
+from deepmate.tasks.execute import (
+    ExecuteDecision,
+    ExecuteEvidence,
+    evaluate_execute_progress,
+    parse_execute_evaluation,
+)
+from deepmate.tasks.store import DegenerateTaskPlanError, TaskModeState
 from deepmate.tasks.update import update_evolution_markdown
 from deepmate.tasks.update import _contains_progress_signal
 
@@ -174,6 +180,26 @@ class TaskModeTests(unittest.TestCase):
         self.assertEqual(result.decision, ExecuteDecision.CONTINUE)
         self.assertEqual(result.next_instruction, "fix the failing test")
 
+    def test_execute_budget_accepts_achievement_on_last_allowed_turn(self) -> None:
+        plan = _execution_plan_md().replace("- [ ]", "- [x]")
+        evaluation = evaluate_execute_progress(
+            None,
+            model="stub-model",
+            documents=TaskDocuments(plan=plan),
+            evidence=ExecuteEvidence(
+                user_prompt="Finish the task.",
+                final_answer="All tests passed and the result is verified.",
+            ),
+            state=TaskModeState(
+                stage=TaskStage.EXECUTE,
+                updated_at="2026-07-18T00:00:00+00:00",
+                execute_turns=5,
+            ),
+            turn_budget=6,
+        )
+
+        self.assertEqual(evaluation.decision, ExecuteDecision.ACHIEVED)
+
     def test_task_update_checkpoint_keeps_partial_valid_fields_when_achievement_missing(
         self,
     ) -> None:
@@ -266,6 +292,28 @@ class TaskModeTests(unittest.TestCase):
         self.assertIn("&lt;/current_plan&gt;", section)
         self.assertIn("truncated task context", section)
         self.assertLess(context.estimated_tokens, 6500)
+
+    def test_task_context_semantic_compaction_preserves_contract_headings(self) -> None:
+        sections = (
+            "## Goal",
+            "## Acceptance Contract",
+            "## Scope",
+            "## Execution Plan",
+            "## Verification Strategy",
+            "## Current Progress",
+            "## Next Step",
+        )
+        long_plan = "# Current Plan\n\n" + "\n\n".join(
+            f"{heading}\n" + (f"detail for {heading} " * 800)
+            for heading in sections
+        )
+
+        context = build_task_context(TaskDocuments(plan=long_plan), TaskStage.EXECUTE)
+
+        for heading in sections:
+            self.assertIn(heading, context.plan)
+        self.assertIn("truncated task context", context.plan)
+        self.assertLessEqual(context.estimated_tokens, 6000)
 
     def test_task_evolution_timeline_is_trimmed_and_indented_headings_match(self) -> None:
         content = "  ## Rolling Summary\n- old\n\n  ## Timeline\n"
@@ -373,6 +421,42 @@ class TaskModeTests(unittest.TestCase):
                     ),
                     stage=TaskStage.EXECUTE,
                 )
+
+    def test_task_update_rolls_back_plan_when_evolution_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(tmp)
+            store.ensure()
+            documents = store.read_documents()
+            updated_plan = documents.plan.replace(
+                "说明本任务要达成的最终结果。",
+                "完成可靠的多文件 Task Update。",
+            )
+
+            def fail_evolution_write(operation, path, _content):
+                if operation == "task.write_evolution":
+                    raise OSError(f"simulated write failure: {path.name}")
+
+            store.set_write_checkpoint(fail_evolution_write)
+            with self.assertRaisesRegex(OSError, "simulated write failure"):
+                apply_task_update_result(
+                    store,
+                    TaskUpdateResult(
+                        plan_md=updated_plan,
+                        rolling_summary=(
+                            "长期目标",
+                            "已完成阶段",
+                            "当前阶段",
+                            "关键决策",
+                            "下一步",
+                        ),
+                    ),
+                    stage=TaskStage.PLAN,
+                    documents=documents,
+                )
+
+            restored = store.read_documents()
+            self.assertEqual(restored.plan, documents.plan)
+            self.assertEqual(restored.evolution, documents.evolution)
 
     def test_task_update_does_not_write_achievement_when_not_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -753,6 +753,38 @@ class PetCompanionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "local network URLs"):
             fetch_learning_candidates("http://localhost:8000/")
 
+    def test_learning_candidates_validate_and_use_final_redirect_url(self) -> None:
+        from deepmate.pet.learning import fetch_learning_candidates
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def geturl(self):
+                return "https://final.example/feed/"
+
+            def read(self, size=-1):
+                return b'<a href="article">Redirected article</a>'
+
+        with (
+            patch("deepmate.pet.learning.validate_public_url") as validate,
+            patch(
+                "deepmate.pet.learning._open_public_request",
+                return_value=Response(),
+            ),
+        ):
+            candidates = fetch_learning_candidates("https://start.example/feed")
+
+        self.assertEqual(
+            tuple(call.args[0] for call in validate.call_args_list),
+            ("https://start.example/feed", "https://final.example/feed/"),
+        )
+        self.assertEqual(candidates[0].url, "https://final.example/feed/article")
+        self.assertEqual(candidates[0].source, "https://final.example/feed/")
+
     def test_learning_candidates_reject_oversized_sources(self) -> None:
         from deepmate.pet.learning import MAX_LEARNING_SOURCE_BYTES, fetch_learning_candidates
 
@@ -768,7 +800,10 @@ class PetCompanionTests(unittest.TestCase):
 
         with (
             patch("deepmate.pet.learning.validate_public_url", return_value=None),
-            patch("deepmate.pet.learning.urlopen", return_value=Response()),
+            patch(
+                "deepmate.pet.learning._open_public_request",
+                return_value=Response(),
+            ),
         ):
             with self.assertRaisesRegex(
                 ValueError,

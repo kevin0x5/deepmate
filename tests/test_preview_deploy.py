@@ -6,6 +6,7 @@ import socket
 import tempfile
 import time
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +15,10 @@ import deepmate.preview_deploy.commands as deploy_commands
 from deepmate.preview_deploy import PreviewDeployStore, handle_deploy_command
 from deepmate.preview_deploy.health import HealthCheck
 from deepmate.preview_deploy.state import PreviewDeployState
+from deepmate.preview_deploy.supervisor import (
+    _preview_filesystem_path_allowed,
+    _preview_path_allowed,
+)
 from deepmate.preview_deploy.tunnel import (
     PreviewLease,
     PreviewTunnel,
@@ -103,6 +108,67 @@ class _ProcessTunnelProvider(_FakeTunnelProvider):
 
 
 class PreviewDeployTests(unittest.TestCase):
+    def test_static_file_preview_allows_only_selected_html(self) -> None:
+        self.assertTrue(
+            _preview_path_allowed(
+                "/report.html?cache=1",
+                target_kind="static_file",
+                entry_path="report.html",
+            )
+        )
+        for path in (
+            "/",
+            "/.env",
+            "/%2eenv",
+            "/README.md",
+            "/src/deepmate/__init__.py",
+            "/other.html",
+            "/../report.html",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(
+                    _preview_path_allowed(
+                        path,
+                        target_kind="static_file",
+                        entry_path="report.html",
+                    )
+                )
+
+    def test_static_directory_preview_blocks_sensitive_paths(self) -> None:
+        self.assertTrue(
+            _preview_path_allowed(
+                "/assets/app.js",
+                target_kind="static_dir",
+                entry_path="",
+            )
+        )
+        for path in ("/.env", "/.git/config", "/keys/deploy.pem", "/var/state.json"):
+            with self.subTest(path=path):
+                self.assertFalse(
+                    _preview_path_allowed(
+                        path,
+                        target_kind="static_dir",
+                        entry_path="",
+                    )
+                )
+
+    def test_static_preview_rejects_symlink_escape_from_serve_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            serve_root = root / "public"
+            serve_root.mkdir()
+            outside = root / "private.txt"
+            outside.write_text("private", encoding="utf-8")
+            linked = serve_root / "asset.txt"
+            try:
+                linked.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symlinks are unavailable: {exc}")
+
+            allowed = _preview_filesystem_path_allowed(linked, serve_root)
+
+        self.assertFalse(allowed)
+
     def test_static_preview_rejects_target_outside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -224,6 +290,16 @@ class PreviewDeployTests(unittest.TestCase):
                         timeout=2,
                     ).read()
                     self.assertIn(b"Deepmate Preview", body)
+                    (workspace / ".env").write_text(
+                        "SECRET=not-for-preview",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as denied:
+                        urllib.request.urlopen(
+                            state.local_url.rsplit("/", 1)[0] + "/.env",
+                            timeout=2,
+                        )
+                    self.assertEqual(denied.exception.code, 404)
 
                     status = handle_deploy_command(
                         "/deploy status",

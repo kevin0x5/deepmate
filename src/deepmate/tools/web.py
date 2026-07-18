@@ -3,26 +3,17 @@
 from __future__ import annotations
 
 import html
-import http.client
 import re
-import socket
-import ssl
 import base64
 import codecs
 from collections.abc import Mapping, Sequence
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
-from urllib.request import (
-    HTTPHandler,
-    HTTPRedirectHandler,
-    HTTPSHandler,
-    ProxyHandler,
-    Request,
-    build_opener,
-)
+from urllib.request import Request
 
+from deepmate.public_http import open_public_request
 from deepmate.tools.registry import NativeTool, NativeToolResult
-from deepmate.tools.url_safety import public_url_resolution, validate_public_url
+from deepmate.url_safety import validate_public_url
 
 USER_AGENT = "Deepmate/0.1 (+https://github.com/kevin0x5/deepmate)"
 MAX_RESPONSE_BYTES = 2_000_000
@@ -179,73 +170,7 @@ def _request_public_url(url: str, *, max_bytes: int) -> tuple[bytes, str, str]:
 
 
 def _open_public_request(request: Request):
-    return build_opener(
-        ProxyHandler({}),
-        _PublicHTTPHandler(),
-        _PublicHTTPSHandler(),
-        _PublicRedirectHandler(),
-    ).open(request, timeout=20)
-
-
-class _PublicHTTPConnection(http.client.HTTPConnection):
-    """HTTP connection that connects to a prevalidated public IP."""
-
-    _scheme = "http"
-
-    def connect(self) -> None:
-        resolution = public_url_resolution(_connection_url(self._scheme, self.host, self.port))
-        self.sock = socket.create_connection(
-            (resolution.first_address(), self.port),
-            self.timeout,
-            self.source_address,
-        )
-        if self._tunnel_host:
-            self._tunnel()
-
-
-class _PublicHTTPSConnection(http.client.HTTPSConnection):
-    """HTTPS connection that connects to a prevalidated public IP with original SNI."""
-
-    _scheme = "https"
-
-    def __init__(self, *args, context=None, check_hostname=None, **kwargs) -> None:
-        if context is None:
-            context = ssl._create_default_https_context()
-        super().__init__(*args, context=context, check_hostname=check_hostname, **kwargs)
-
-    def connect(self) -> None:
-        resolution = public_url_resolution(_connection_url(self._scheme, self.host, self.port))
-        sock = socket.create_connection(
-            (resolution.first_address(), self.port),
-            self.timeout,
-            self.source_address,
-        )
-        if self._tunnel_host:
-            self.sock = sock
-            self._tunnel()
-            server_hostname = self._tunnel_host
-        else:
-            server_hostname = self.host
-        self.sock = self._context.wrap_socket(
-            sock,
-            server_hostname=server_hostname if ssl.HAS_SNI else None,
-        )
-
-
-class _PublicHTTPHandler(HTTPHandler):
-    def http_open(self, req):
-        return self.do_open(_PublicHTTPConnection, req)
-
-
-class _PublicHTTPSHandler(HTTPSHandler):
-    def https_open(self, req):
-        return self.do_open(_PublicHTTPSConnection, req)
-
-
-class _PublicRedirectHandler(HTTPRedirectHandler):
-    def redirect_request(self, request, fp, code, msg, headers, newurl):
-        validate_public_url(newurl)
-        return super().redirect_request(request, fp, code, msg, headers, newurl)
+    return open_public_request(request, timeout=20)
 
 
 def _validate_public_url(url: str) -> None:
@@ -288,12 +213,6 @@ def _html_meta_charset(body: bytes) -> str:
         if match:
             return match.group(1).strip().strip("\"'")
     return ""
-
-
-def _connection_url(scheme: str, host: str, port: int) -> str:
-    hostname = host.strip("[]")
-    display_host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
-    return f"{scheme}://{display_host}:{port}/"
 
 
 class _ReadableHtmlParser(HTMLParser):

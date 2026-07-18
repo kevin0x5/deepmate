@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from deepmate.storage import atomic_write_json, file_lock
 
 LOCAL_STATE_VERSION = 1
 
@@ -119,13 +120,8 @@ class LocalModelStateStore:
     def save(self, state: LocalModelPrepareState) -> None:
         if self._path is None:
             return
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(f"{self._path.suffix}.tmp")
-        tmp_path.write_text(
-            json.dumps(state.to_json(), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(tmp_path, self._path)
+        with file_lock(self._path):
+            atomic_write_json(self._path, state.to_json())
 
     def record(
         self,

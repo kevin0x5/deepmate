@@ -93,6 +93,7 @@ class SessionRuntime:
     behavior_runtime: "BehaviorRuntime | None" = None
     # --- system-context prefix-cache fields (not part of public API) ---
     _last_context_epoch: int = 0
+    _last_context_generation: str = ""
     _last_capability_tag: tuple[str, ...] = field(default_factory=tuple)
     _last_skill_selection_tag: tuple[str, ...] = field(default_factory=tuple)
     _cached_system_context: ContextBuildResult | None = None
@@ -248,11 +249,12 @@ class SessionRuntime:
         skill_docs = tuple(selected_skill_documents)
         schema_docs = tuple(tool_schemas)
         current_epoch = runtime.activation.context_epoch
+        current_generation = runtime.activation.context_snapshot.generation
         current_capability_tag = _capability_cache_tag(capability_surface)
         current_skill_tag = tuple(_skill_cache_tag(skill) for skill in skill_docs)
 
         if (
-            current_epoch == runtime._last_context_epoch
+            current_generation == runtime._last_context_generation
             and current_capability_tag == runtime._last_capability_tag
             and current_skill_tag == runtime._last_skill_selection_tag
             and runtime._cached_system_context is not None
@@ -277,6 +279,7 @@ class SessionRuntime:
             runtime = replace(
                 runtime,
                 _last_context_epoch=current_epoch,
+                _last_context_generation=current_generation,
                 _last_capability_tag=current_capability_tag,
                 _last_skill_selection_tag=current_skill_tag,
                 _cached_system_context=system_context,
@@ -287,6 +290,7 @@ class SessionRuntime:
                 "Built fresh system context — prefix-cache may be invalidated.",
                 refs=(
                     f"context_epoch={current_epoch}",
+                    f"context_generation={current_generation[:12]}",
                     f"capability_tag_n={len(current_capability_tag)}",
                     f"skill_tag_n={len(current_skill_tag)}",
                     *runtime.activation.context_snapshot.trace_refs(),

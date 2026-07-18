@@ -11,6 +11,17 @@ from deepmate.foundation import estimate_text_tokens
 
 TASK_CONTEXT_TOKEN_BUDGET = 6000
 PLAN_TOKEN_BUDGET = 2500
+PLAN_SECTION_WEIGHTS = (
+    (("goal", "目标"), 2),
+    (("acceptance contract", "acceptance criteria", "验收契约", "验收标准"), 3),
+    (("scope", "范围"), 2),
+    (("execution plan", "执行计划"), 3),
+    (("verification strategy", "验证策略"), 3),
+    (("current progress", "execution progress", "当前进度", "执行进度"), 2),
+    (("blockers", "阻塞"), 1),
+    (("next step", "下一步"), 2),
+    (("risks", "decisions", "风险", "决策"), 1),
+)
 
 
 class TaskStage(StrEnum):
@@ -76,7 +87,7 @@ def build_task_context(
     achievement_limit: int = 3,
 ) -> TaskContext:
     """Build a bounded Task Mode context from project task markdown files."""
-    plan = _bounded_text(documents.plan.strip(), token_budget=PLAN_TOKEN_BUDGET)
+    plan = _bounded_plan(documents.plan.strip(), token_budget=PLAN_TOKEN_BUDGET)
     rolling_summary = extract_rolling_summary(documents.evolution)
     recent_timeline = extract_recent_timeline(documents.evolution, limit=timeline_limit)
     recent_achievements = render_recent_achievements(
@@ -272,8 +283,89 @@ def _fit_task_parts(
         recent_timeline = _bounded_text(recent_timeline, token_budget=1000)
     parts = [plan, rolling_summary, recent_timeline, recent_achievements]
     if estimate_text_tokens("\n\n".join(part for part in parts if part.strip())) > token_budget:
-        plan = _bounded_text(plan, token_budget=1200)
+        plan = _bounded_plan(plan, token_budget=1200)
     return plan, rolling_summary, recent_timeline, recent_achievements
+
+
+def _bounded_plan(text: str, *, token_budget: int) -> str:
+    """Bound a plan while retaining its contract and operational sections."""
+    clean = text.strip()
+    if not clean or estimate_text_tokens(clean) <= token_budget:
+        return clean
+    prefix, sections = _level_two_sections(clean)
+    weighted = [
+        (heading, body, weight)
+        for heading, body in sections
+        if (weight := _plan_section_weight(heading)) > 0
+    ]
+    if not weighted:
+        return _bounded_text(clean, token_budget=token_budget)
+
+    prefix_budget = min(100, max(40, token_budget // 12))
+    remaining_budget = max(200, token_budget - prefix_budget)
+    total_weight = sum(weight for _, _, weight in weighted)
+    rendered: list[str] = []
+    if prefix.strip():
+        rendered.append(_bounded_text(prefix, token_budget=prefix_budget))
+    for heading, body, weight in weighted:
+        section_budget = max(80, remaining_budget * weight // total_weight)
+        bounded_body = _bounded_text(body, token_budget=section_budget)
+        rendered.append(
+            heading if not bounded_body else f"{heading}\n{bounded_body}"
+        )
+    result = "\n\n".join(rendered).strip()
+    if estimate_text_tokens(result) <= token_budget:
+        return result
+
+    # Token estimation is approximate. A second proportional pass keeps every
+    # selected heading instead of falling back to a head/tail cut across sections.
+    scale = max(0.25, token_budget / max(1, estimate_text_tokens(result)))
+    rendered = []
+    if prefix.strip():
+        rendered.append(
+            _bounded_text(
+                prefix,
+                token_budget=max(30, int(prefix_budget * scale)),
+            )
+        )
+    for heading, body, weight in weighted:
+        section_budget = max(
+            40,
+            int(remaining_budget * weight / total_weight * scale),
+        )
+        bounded_body = _bounded_text(body, token_budget=section_budget)
+        rendered.append(heading if not bounded_body else f"{heading}\n{bounded_body}")
+    return "\n\n".join(rendered).strip()
+
+
+def _level_two_sections(text: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+    prefix: list[str] = []
+    sections: list[tuple[str, str]] = []
+    heading = ""
+    body: list[str] = []
+    for line in text.splitlines():
+        if line.strip().startswith("## "):
+            if heading:
+                sections.append((heading, "\n".join(body).strip()))
+            else:
+                prefix = body
+            heading = line.strip()
+            body = []
+        else:
+            body.append(line)
+    if heading:
+        sections.append((heading, "\n".join(body).strip()))
+    else:
+        prefix = body
+    return "\n".join(prefix).strip(), tuple(sections)
+
+
+def _plan_section_weight(heading: str) -> int:
+    clean = heading.lstrip("#").strip().lower().rstrip(":：")
+    for names, weight in PLAN_SECTION_WEIGHTS:
+        if clean in names:
+            return weight
+    return 0
 
 
 def _bounded_text(text: str, *, token_budget: int) -> str:

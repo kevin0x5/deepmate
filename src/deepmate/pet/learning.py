@@ -8,12 +8,13 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from urllib.parse import urljoin
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from deepmate.domain import Message, MessageRole
 from deepmate.pet.state import PetProfile
 from deepmate.providers import ModelConversationItem, ModelProvider, ModelRequest
-from deepmate.tools.url_safety import validate_public_url
+from deepmate.public_http import open_public_request
+from deepmate.url_safety import validate_public_url
 
 MAX_LEARNING_SOURCE_BYTES = 500_000
 
@@ -52,12 +53,18 @@ def fetch_learning_candidates(
     """Fetch a whitelist source and extract simple link candidates."""
     validate_public_url(url)
     request = Request(url, headers={"User-Agent": "DeepmatePet/0.1"})
-    with urlopen(request, timeout=timeout) as response:
+    with _open_public_request(request, timeout=timeout) as response:
+        final_url = str(getattr(response, "geturl", lambda: url)())
+        validate_public_url(final_url)
         raw = response.read(MAX_LEARNING_SOURCE_BYTES + 1)
     if len(raw) > MAX_LEARNING_SOURCE_BYTES:
         raise ValueError(f"learning source exceeds {MAX_LEARNING_SOURCE_BYTES} bytes")
     text = raw.decode("utf-8", errors="replace")
-    return _links_from_html(text, base_url=url, source=url, limit=limit)
+    return _links_from_html(text, base_url=final_url, source=final_url, limit=limit)
+
+
+def _open_public_request(request: Request, *, timeout: int):
+    return open_public_request(request, timeout=timeout)
 
 
 def generate_learning_suggestion(

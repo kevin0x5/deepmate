@@ -25,6 +25,8 @@ class ToolFailureEvidence:
     tool_name: str
     error_signature: str
     source_ref: str
+    confidence: float = 1.0
+    source_group: str = ""
 
     def signature(self) -> str:
         """Return the same-tool same-error grouping signature."""
@@ -38,6 +40,9 @@ class UserCorrectionEvidence:
     signature: str
     correction: str
     source_ref: str
+    confidence: float = 1.0
+    source_group: str = ""
+    target_scope: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +55,8 @@ class WorkflowEvidence:
     steps: tuple[str, ...]
     source_ref: str
     reference_paths: tuple[str, ...] = ()
+    confidence: float = 1.0
+    source_group: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +132,10 @@ def collect_evidence_from_records(
         kind = normalize_name(_record_text(record, "kind")).replace(" ", "_")
         refs = _record_refs(record)
         source_ref = _source_ref(record, refs, index)
+        confidence = _record_confidence(record, refs)
+        source_group = _record_value(record, refs, "source_group") or source_ref
+        if confidence < 0.5:
+            continue
         if kind in {"tool_failure", "tool_failed", "mcp_tool_failed", "native_tool_failed"}:
             tool_name = _record_value(record, refs, "tool_name", "tool") or _first_bare_ref(refs)
             error = _record_value(
@@ -135,7 +146,9 @@ def collect_evidence_from_records(
                 "message",
             ) or _record_text(record, "summary")
             if tool_name and error:
-                tool_failures.append(ToolFailureEvidence(tool_name, error, source_ref))
+                tool_failures.append(
+                    ToolFailureEvidence(tool_name, error, source_ref, confidence, source_group)
+                )
             continue
         if kind in {"user_correction", "user_corrected", "correction"}:
             signature = _record_value(record, refs, "signature", "topic")
@@ -145,7 +158,14 @@ def collect_evidence_from_records(
             )
             if signature and correction:
                 user_corrections.append(
-                    UserCorrectionEvidence(signature, correction, source_ref)
+                    UserCorrectionEvidence(
+                        signature,
+                        correction,
+                        source_ref,
+                        confidence,
+                        source_group,
+                        _record_value(record, refs, "target_scope", "scope"),
+                    )
                 )
             continue
         if kind in {"workflow_success", "successful_workflow", "workflow_completed"}:
@@ -166,6 +186,8 @@ def collect_evidence_from_records(
                         steps=steps,
                         source_ref=source_ref,
                         reference_paths=reference_paths,
+                        confidence=confidence,
+                        source_group=source_group,
                     )
                 )
     return EvolutionEvidenceBatch(
@@ -188,7 +210,7 @@ def user_correction_candidates(
     return tuple(
         _correction_aggregate(signature, items)
         for signature, items in sorted(grouped.items())
-        if len(items) >= threshold
+        if len(_distinct_source_groups(items)) >= threshold
     )
 
 
@@ -205,7 +227,7 @@ def tool_failure_candidates(
     return tuple(
         _tool_failure_aggregate(signature, items)
         for signature, items in sorted(grouped.items())
-        if len(items) >= threshold
+        if len(_distinct_source_groups(items)) >= threshold
     )
 
 
@@ -221,20 +243,21 @@ def workflow_candidates(
             grouped[signature].append(workflow)
     candidates: list[WorkflowAggregate] = []
     for signature, items in sorted(grouped.items()):
-        if len(items) < threshold:
+        distinct_items = _distinct_source_groups(items)
+        if len(distinct_items) < threshold:
             continue
-        first = items[0]
-        steps = _merge_steps(tuple(item.steps for item in items))
-        refs = _merge_strings(item.source_ref for item in items)
+        first = distinct_items[0]
+        steps = _merge_steps(tuple(item.steps for item in distinct_items))
+        refs = _merge_strings(item.source_ref for item in distinct_items)
         reference_paths = _merge_strings(
-            path for item in items for path in item.reference_paths
+            path for item in distinct_items for path in item.reference_paths
         )
         candidate = WorkflowAggregate(
             signature=signature,
             name=first.name,
             description=first.description,
             steps=steps,
-            count=len(items),
+            count=len(distinct_items),
             source_refs=refs,
             reference_paths=reference_paths,
         )
@@ -250,7 +273,7 @@ def _correction_aggregate(
     return EvidenceAggregate(
         kind="user_correction",
         signature=signature,
-        count=len(items),
+        count=len(_distinct_source_groups(items)),
         source_refs=_merge_strings(item.source_ref for item in items),
         examples=_merge_strings(item.correction for item in items),
     )
@@ -263,7 +286,7 @@ def _tool_failure_aggregate(
     return EvidenceAggregate(
         kind="tool_failure",
         signature=signature,
-        count=len(items),
+        count=len(_distinct_source_groups(items)),
         source_refs=_merge_strings(item.source_ref for item in items),
         examples=_merge_strings(item.error_signature for item in items),
     )
@@ -284,6 +307,31 @@ def _merge_strings(values) -> tuple[str, ...]:
         seen.add(key)
         merged.append(text)
     return tuple(merged)
+
+
+def _distinct_source_groups(items):
+    distinct = []
+    seen: set[str] = set()
+    for item in items:
+        group = item.source_group.strip() or item.source_ref.strip()
+        if not group or group in seen:
+            continue
+        seen.add(group)
+        distinct.append(item)
+    return distinct
+
+
+def _record_confidence(record: Mapping[str, object], refs: tuple[str, ...]) -> float:
+    value = record.get("confidence")
+    raw = str(value).strip() if isinstance(value, int | float | str) else ""
+    if not raw:
+        raw = _record_value(record, refs, "confidence")
+    if not raw:
+        return 1.0
+    try:
+        return min(1.0, max(0.0, float(raw)))
+    except ValueError:
+        return 0.0
 
 
 def _record_text(record: Mapping[str, object], key: str) -> str:

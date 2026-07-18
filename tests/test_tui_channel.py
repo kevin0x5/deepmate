@@ -103,6 +103,7 @@ from deepmate.channels.tui.state import (
 from deepmate.context import build_profile_context_snapshot
 from deepmate.domain import ErrorInfo, Message, MessageRole, ProfileRef, RuntimeEvent
 from deepmate.local import (
+    LocalModelCancellationToken,
     LocalModelInstallResult,
     LocalModelStateStore,
     local_model_by_id,
@@ -1195,6 +1196,7 @@ class TuiChannelTests(unittest.TestCase):
             self.assertTrue(workers)
             self.assertTrue(workers[0][1])
             self.assertTrue(app._local_prepare_running)
+            self.assertIsNotNone(app._local_prepare_cancellation)
             self.assertTrue(any(message.title == "/local" for message in messages))
 
     def test_tui_prompt_without_available_model_is_queued_with_choice_hint(self) -> None:
@@ -3136,6 +3138,20 @@ class TuiChannelTests(unittest.TestCase):
 
             self.assertTrue(app._interrupted)
             self.assertEqual(messages[-1].title, "interrupt")
+
+    def test_tui_escape_cancels_local_model_prepare(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = _workspace(Path(tmp))
+            app = DeepmateTuiApp(_state(workspace))
+            messages = []
+            app._write = messages.append
+            app._local_prepare_running = True
+            app._local_prepare_cancellation = LocalModelCancellationToken()
+
+            app.action_interrupt_or_cancel()
+
+            self.assertTrue(app._local_prepare_cancellation.is_cancelled())
+            self.assertIn("取消本地模型", messages[-1].body)
 
     def test_tui_escape_denies_pending_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

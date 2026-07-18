@@ -10,7 +10,9 @@ import signal
 import socket
 import sys
 import threading
+from http import HTTPStatus
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from deepmate.preview_deploy.state import (
     PreviewDeployState,
@@ -23,10 +25,82 @@ from deepmate.runtime.wakelock import RuntimeWakeSession, WakeConfig
 
 
 class _QuietStaticHandler(http.server.SimpleHTTPRequestHandler):
-    """Static file handler without noisy stdout logging."""
+    """Static preview handler scoped to the selected deploy target."""
+
+    def __init__(
+        self,
+        *args: object,
+        target_kind: str = "static_dir",
+        entry_path: str = "",
+        **kwargs: object,
+    ) -> None:
+        self._target_kind = target_kind.strip()
+        self._entry_path = entry_path.strip().lstrip("/")
+        super().__init__(*args, **kwargs)
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         return
+
+    def send_head(self):
+        if not _preview_path_allowed(
+            self.path,
+            target_kind=self._target_kind,
+            entry_path=self._entry_path,
+        ) or not _preview_filesystem_path_allowed(
+            self.translate_path(self.path),
+            self.directory,
+        ):
+            self.send_error(HTTPStatus.NOT_FOUND, "Preview path not found")
+            return None
+        return super().send_head()
+
+    def list_directory(self, path: str):
+        self.send_error(HTTPStatus.NOT_FOUND, "Directory listing is disabled")
+        return None
+
+
+def _preview_path_allowed(raw_path: str, *, target_kind: str, entry_path: str) -> bool:
+    """Return whether one URL path belongs to the selected static preview."""
+    try:
+        path = unquote(urlsplit(raw_path).path, errors="strict")
+    except (UnicodeDecodeError, ValueError):
+        return False
+    relative = path.lstrip("/")
+    parts = tuple(part for part in relative.split("/") if part not in {"", "."})
+    if any(part == ".." or _sensitive_preview_segment(part) for part in parts):
+        return False
+    if target_kind.strip() == "static_file":
+        clean_entry = entry_path.strip().lstrip("/")
+        return bool(clean_entry and relative == clean_entry)
+    return True
+
+
+def _sensitive_preview_segment(value: str) -> bool:
+    clean = value.strip().lower()
+    if clean in {
+        ".aws",
+        ".env",
+        ".git",
+        ".hg",
+        ".ssh",
+        ".svn",
+        ".npmrc",
+        ".pypirc",
+        "var",
+    }:
+        return True
+    if clean.startswith(".env."):
+        return True
+    return clean.endswith((".pem", ".key", ".p12", ".pfx"))
+
+
+def _preview_filesystem_path_allowed(path: str | Path, serve_root: str | Path) -> bool:
+    """Return whether a translated request path stays inside the static root."""
+    try:
+        Path(path).resolve().relative_to(Path(serve_root).resolve())
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -53,7 +127,12 @@ def main(argv: list[str] | None = None) -> int:
         store.save(state.with_status("stale", message="static preview root is missing"))
         return 1
 
-    handler = functools.partial(_QuietStaticHandler, directory=str(serve_root))
+    handler = functools.partial(
+        _QuietStaticHandler,
+        directory=str(serve_root),
+        target_kind=args.target_kind,
+        entry_path=args.entry_path,
+    )
     try:
         server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), handler)
     except OSError as exc:

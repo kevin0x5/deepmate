@@ -460,6 +460,10 @@ def _command_risk(command: str, network_mode: str) -> SafetyRiskLevel:
     normalized = _normalized_command(command)
     if network_mode == "on":
         return SafetyRiskLevel.HIGH
+    if _uses_active_command_substitution(command):
+        return SafetyRiskLevel.HIGH
+    if _uses_shell_control_syntax(command):
+        return SafetyRiskLevel.MEDIUM
     if re.match(
         r"^(python3? -m unittest|python3? -m pytest|pytest|npm test|npm run test|"
         r"pnpm test|yarn test|git status|git diff|git log|git show|ls|pwd)\b",
@@ -540,6 +544,56 @@ def _uses_dynamic_shell_execution(command: str) -> bool:
         return True
     if "$(" in text or "`" in text:
         return True
+    return False
+
+
+def _uses_active_command_substitution(command: str) -> bool:
+    """Return whether the shell would evaluate command substitution syntax."""
+    text = _normalize_shell_text(command)
+    quote = ""
+    escaped = False
+    for index, character in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\" and quote != "'":
+            escaped = True
+            continue
+        if character == "'" and quote != '"':
+            quote = "" if quote == "'" else "'"
+            continue
+        if character == '"' and quote != "'":
+            quote = "" if quote == '"' else '"'
+            continue
+        if quote == "'":
+            continue
+        if character == "`":
+            return True
+        if character == "$" and index + 1 < len(text) and text[index + 1] == "(":
+            return True
+    return False
+
+
+def _uses_shell_control_syntax(command: str) -> bool:
+    """Return whether a command contains unquoted shell composition syntax."""
+    quote = ""
+    escaped = False
+    for character in _normalize_shell_text(command):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote:
+            if character == quote:
+                quote = ""
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            continue
+        if character in {";", "\n", "\r", "|", "&", "<", ">", "(", ")"}:
+            return True
     return False
 
 

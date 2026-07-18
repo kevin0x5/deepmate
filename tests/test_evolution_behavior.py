@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from deepmate.domain import ProfileRef
 from deepmate.evolution import (
@@ -132,6 +133,34 @@ class EvolutionBehaviorTests(unittest.TestCase):
 
             self.assertEqual(len(loaded), 1)
             self.assertEqual(loaded[0].change_id, change.change_id if change else "")
+
+    def test_behavior_update_restores_file_when_audit_append_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            profile = ProfileRef(name="default", uri="profiles/default")
+            data_dir = workspace / "var"
+            behavior_path = workspace / ".deepmate" / "behavior.md"
+            behavior_path.parent.mkdir(parents=True)
+            original = "# Behavior Hints\n\n- Existing hint.\n"
+            behavior_path.write_text(original, encoding="utf-8")
+
+            with patch.object(
+                EvolutionChangeStore,
+                "append",
+                side_effect=OSError("simulated audit failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "simulated audit failure"):
+                    apply_behavior_hint_change(
+                        workspace=workspace,
+                        data_dir=data_dir,
+                        profile=profile,
+                        hints=("Prefer concise closure.",),
+                    )
+
+            self.assertEqual(behavior_path.read_text(encoding="utf-8"), original)
+            self.assertFalse(
+                EvolutionChangeStore.in_data_dir(data_dir, profile).path.exists()
+            )
 
     def test_evolution_maintenance_normalizes_existing_behavior_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

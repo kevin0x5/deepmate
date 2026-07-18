@@ -30,7 +30,12 @@ from deepmate.runtime.sandbox import (
     _seatbelt_profile,
     _sensitive_workspace_paths,
 )
-from deepmate.runtime.safety import ApprovalDecision, SessionApprovalCache, ToolSafetyPolicy
+from deepmate.runtime.safety import (
+    ApprovalDecision,
+    SafetyRiskLevel,
+    SessionApprovalCache,
+    ToolSafetyPolicy,
+)
 from deepmate.runtime.safety import safe_environment
 from deepmate.tools import NativeToolRegistry, RUN_SHELL_COMMAND_TOOL_NAME, shell_tools
 
@@ -107,6 +112,63 @@ class ShellSafetyTests(unittest.TestCase):
         self.assertTrue(hidden_listing.requires_approval)
         self.assertIn("outside the low-risk", hidden_listing.reason)
         self.assertTrue(ordinary_listing.allowed)
+
+    def test_low_risk_prefix_cannot_hide_shell_composition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = ToolSafetyPolicy(
+                workspace=Path(tmp),
+                shell_enabled=True,
+                network_enabled=False,
+            )
+
+            decisions = (
+                policy.check_shell_command("git status; touch modified"),
+                policy.check_shell_command("python3 -m unittest && touch modified"),
+                policy.check_shell_command("pwd || touch modified"),
+                policy.check_shell_command("git log | tee output.txt"),
+                policy.check_shell_command("git diff > output.patch"),
+                policy.check_shell_command("ls\ntouch modified"),
+                policy.check_shell_command("(git status)"),
+            )
+
+        for decision in decisions:
+            with self.subTest(refs=decision.refs):
+                self.assertFalse(decision.allowed)
+                self.assertTrue(decision.requires_approval)
+                self.assertEqual(decision.risk_level, SafetyRiskLevel.MEDIUM)
+
+    def test_quoted_shell_metacharacters_do_not_change_low_risk_classification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = ToolSafetyPolicy(
+                workspace=Path(tmp),
+                shell_enabled=True,
+                network_enabled=False,
+            )
+
+            decision = policy.check_shell_command(
+                "python3 -m unittest -k 'semicolon; pipe| redirect> ampersand& "
+                "literal $(ignored) `ignored`'"
+            )
+
+        self.assertTrue(decision.allowed)
+        self.assertFalse(decision.requires_approval)
+        self.assertEqual(decision.risk_level, SafetyRiskLevel.LOW)
+
+    def test_low_risk_prefix_cannot_hide_dynamic_shell_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = ToolSafetyPolicy(
+                workspace=Path(tmp),
+                shell_enabled=True,
+                network_enabled=False,
+            )
+
+            decision = policy.check_shell_command(
+                "python3 -m unittest $(touch modified)"
+            )
+
+        self.assertFalse(decision.allowed)
+        self.assertTrue(decision.requires_approval)
+        self.assertEqual(decision.risk_level, SafetyRiskLevel.HIGH)
 
     def test_medium_shell_command_requires_approval_with_shell_access(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -22,6 +22,10 @@ MCP_REQUEST_TIMEOUT_SECONDS = 30.0
 MAX_MCP_JSON_BYTES = 1_000_000
 MAX_MCP_REQUESTS_PER_MINUTE = 600
 MAX_MCP_INVALID_JSON_LINES = 20
+MAX_MCP_TOOL_PAGES = 100
+MAX_MCP_DISCOVERED_TOOLS = 10_000
+MAX_MCP_TOTAL_SCHEMA_BYTES = 4 * 1024 * 1024
+MAX_MCP_SCHEMA_DEPTH = 32
 DEFAULT_INHERITED_ENV_VARS = (
     (
         "APPDATA",
@@ -162,19 +166,35 @@ class McpStdioClient:
     def list_tools(self) -> tuple[McpToolRef, ...]:
         """Return tools discovered from the server."""
         refs: list[McpToolRef] = []
+        refs_by_name: dict[str, McpToolRef] = {}
+        total_schema_bytes = 0
         cursor = ""
+        seen_cursors: set[str] = set()
+        page_count = 0
         while True:
+            page_count += 1
+            if page_count > MAX_MCP_TOOL_PAGES:
+                raise McpClientError("MCP tools/list exceeded pagination limit")
             params = {"cursor": cursor} if cursor else {}
             response = self._request("tools/list", params)
             result = _mapping(response.get("result"))
             tools = result.get("tools")
             if not isinstance(tools, list):
                 raise McpClientError("MCP tools/list response missing tools list")
-            refs.extend(self._tool_refs_from_items(tools))
+            page_refs = self._tool_refs_from_items(tools)
+            total_schema_bytes = _append_discovered_tool_page(
+                refs,
+                refs_by_name,
+                page_refs,
+                total_schema_bytes,
+            )
             next_cursor = result.get("nextCursor")
             if not isinstance(next_cursor, str) or not next_cursor.strip():
                 break
             cursor = next_cursor.strip()
+            if cursor in seen_cursors:
+                raise McpClientError("MCP tools/list repeated pagination cursor")
+            seen_cursors.add(cursor)
         return tuple(refs)
 
     def server_info(self) -> Mapping[str, object]:
@@ -384,6 +404,61 @@ def _check_mcp_payload_size(payload: bytes, kind: str) -> None:
         raise McpClientError("MCP response payload is too large")
 
 
+def _append_discovered_tool_page(
+    refs: list[McpToolRef],
+    refs_by_name: dict[str, McpToolRef],
+    page_refs: list[McpToolRef],
+    total_schema_bytes: int,
+) -> int:
+    for ref in page_refs:
+        existing = refs_by_name.get(ref.qualified_name())
+        if existing is not None:
+            if _tool_definition_payload(existing) != _tool_definition_payload(ref):
+                raise McpClientError(
+                    f"MCP tools/list returned conflicting duplicate tool: {ref.qualified_name()}"
+                )
+            continue
+        if len(refs) >= MAX_MCP_DISCOVERED_TOOLS:
+            raise McpClientError("MCP tools/list exceeded discovered tool limit")
+        _validate_schema_depth(ref.input_schema)
+        _validate_schema_depth(ref.output_schema)
+        schema_bytes = len(
+            json.dumps(
+                {"input": ref.input_schema, "output": ref.output_schema},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        if total_schema_bytes + schema_bytes > MAX_MCP_TOTAL_SCHEMA_BYTES:
+            raise McpClientError("MCP tools/list exceeded total schema byte limit")
+        refs_by_name[ref.qualified_name()] = ref
+        refs.append(ref)
+        total_schema_bytes += schema_bytes
+    return total_schema_bytes
+
+
+def _tool_definition_payload(ref: McpToolRef) -> tuple[object, ...]:
+    return (
+        ref.title,
+        ref.description,
+        ref.input_schema,
+        ref.output_schema,
+        ref.annotations,
+        ref.meta,
+    )
+
+
+def _validate_schema_depth(value: object, depth: int = 0) -> None:
+    if depth > MAX_MCP_SCHEMA_DEPTH:
+        raise McpClientError("MCP tool schema exceeded nesting depth limit")
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _validate_schema_depth(item, depth + 1)
+    elif isinstance(value, list) or isinstance(value, tuple):
+        for item in value:
+            _validate_schema_depth(item, depth + 1)
+
+
 def _enforce_mcp_request_rate(timestamps: list[float]) -> None:
     now = time.monotonic()
     window_start = now - 60.0
@@ -445,19 +520,35 @@ class McpStreamableHttpClient:
     def list_tools(self) -> tuple[McpToolRef, ...]:
         """Return tools discovered from the server."""
         refs: list[McpToolRef] = []
+        refs_by_name: dict[str, McpToolRef] = {}
+        total_schema_bytes = 0
         cursor = ""
+        seen_cursors: set[str] = set()
+        page_count = 0
         while True:
+            page_count += 1
+            if page_count > MAX_MCP_TOOL_PAGES:
+                raise McpClientError("MCP tools/list exceeded pagination limit")
             params = {"cursor": cursor} if cursor else {}
             response = self._request("tools/list", params)
             result = _mapping(response.get("result"))
             tools = result.get("tools")
             if not isinstance(tools, list):
                 raise McpClientError("MCP tools/list response missing tools list")
-            refs.extend(self._tool_refs_from_items(tools))
+            page_refs = self._tool_refs_from_items(tools)
+            total_schema_bytes = _append_discovered_tool_page(
+                refs,
+                refs_by_name,
+                page_refs,
+                total_schema_bytes,
+            )
             next_cursor = result.get("nextCursor")
             if not isinstance(next_cursor, str) or not next_cursor.strip():
                 break
             cursor = next_cursor.strip()
+            if cursor in seen_cursors:
+                raise McpClientError("MCP tools/list repeated pagination cursor")
+            seen_cursors.add(cursor)
         return tuple(refs)
 
     def server_info(self) -> Mapping[str, object]:

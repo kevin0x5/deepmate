@@ -219,7 +219,7 @@ def apply_task_update_result(
     allow_achievement: bool = True,
 ) -> tuple[Path, ...]:
     """Apply a parsed Task Mode update and return changed paths."""
-    changed: list[Path] = []
+    plan_content = ""
     if result.plan_md.strip():
         if documents is None or result.plan_md.strip() != documents.plan.strip():
             validate_real_plan_content(result.plan_md)
@@ -227,25 +227,25 @@ def apply_task_update_result(
                 raise ValueError(
                     "task/execute update would remove required contract sections"
                 )
-            store.write_plan(result.plan_md)
-            changed.append(store.plan_path)
-    if result.rolling_summary or result.timeline_entry.strip():
-        changed_evolution = store.update_evolution(
-            lambda current: update_evolution_markdown(
+            plan_content = result.plan_md
+    evolution_updater = (
+        lambda current: update_evolution_markdown(
                 current,
                 rolling_summary=result.rolling_summary,
                 timeline_entry=result.timeline_entry,
             )
-        )
-        if changed_evolution:
-            changed.append(store.evolution_path)
-    if allow_achievement and result.achievement_md.strip():
-        path = store.append_achievement(
-            result.achievement_title or _achievement_title(result.achievement_md),
-            result.achievement_md,
-        )
-        changed.append(path)
-    return tuple(changed)
+        if result.rolling_summary or result.timeline_entry.strip()
+        else None
+    )
+    achievement_content = result.achievement_md if allow_achievement else ""
+    return store.apply_update(
+        plan_content=plan_content,
+        evolution_updater=evolution_updater,
+        achievement_title=(
+            result.achievement_title or _achievement_title(result.achievement_md)
+        ),
+        achievement_content=achievement_content,
+    )
 
 
 def should_run_task_update(

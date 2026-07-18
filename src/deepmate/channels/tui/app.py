@@ -50,6 +50,7 @@ from deepmate.channels.tui.formatters import (
 )
 from deepmate.local import (
     LOCAL_PROVIDER_NAME,
+    LocalModelCancellationToken,
     LocalModelInstallResult,
     LocalModelProgress,
     LocalModelStateStore,
@@ -775,6 +776,7 @@ class DeepmateTuiApp(App):
         self._exiting = False
         self._running_turn = False
         self._local_prepare_running = False
+        self._local_prepare_cancellation: LocalModelCancellationToken | None = None
         self._pet_setup_running = False
         self._local_ready_checked = False
         self._pending_approval: _PendingApproval | None = None
@@ -1416,6 +1418,16 @@ class DeepmateTuiApp(App):
         if self._active_tab != "main":
             self._close_active_tab_with_feedback()
             return
+        if self._local_prepare_running and self._local_prepare_cancellation is not None:
+            self._local_prepare_cancellation.cancel()
+            self._write(
+                TuiMessage(
+                    kind="warning",
+                    title="interrupt",
+                    body="正在取消本地模型准备；已下载的 Ollama 分层会保留供下次续传。",
+                )
+            )
+            return
         if self._active_turn_is_current_session():
             self._interrupt_current_turn()
             return
@@ -1747,6 +1759,7 @@ class DeepmateTuiApp(App):
         if self._current_session_is_running() and not request.defer_switch:
             request = replace(request, defer_switch=True)
         self._local_prepare_running = True
+        self._local_prepare_cancellation = LocalModelCancellationToken()
         self._running_turn = True
         self._start_live_work(
             f"正在准备本地模型 · {request.preset.short_label}"
@@ -1770,6 +1783,7 @@ class DeepmateTuiApp(App):
                     progress,
                 ),
                 state_store=LocalModelStateStore(self.state.data_dir),
+                cancellation_token=self._local_prepare_cancellation,
             )
             self._safe_call_from_thread(self._finish_local_prepare_worker, request, result)
         except Exception as exc:
@@ -1798,6 +1812,7 @@ class DeepmateTuiApp(App):
             install_result,
         )
         self._local_prepare_running = False
+        self._local_prepare_cancellation = None
         self._running_turn = bool(self._session_running)
         self._clear_live_work()
         if result.messages:
@@ -1810,6 +1825,7 @@ class DeepmateTuiApp(App):
 
     def _handle_local_prepare_exception(self, exc: BaseException) -> None:
         self._local_prepare_running = False
+        self._local_prepare_cancellation = None
         self._running_turn = bool(self._session_running)
         self._clear_live_work()
         self._prompt_queue.resume()

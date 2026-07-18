@@ -35,6 +35,7 @@ from deepmate.skills.manifest import (
     InstalledSkillRecord,
 )
 from deepmate.skills.skill_file import SKILL_FILE_NAME
+from deepmate.public_http import open_public_request
 
 DEFAULT_SKILL_TARGET = "workspace"
 USER_SKILL_TARGETS = frozenset({"user", "global", "personal", "deepmate"})
@@ -1488,7 +1489,7 @@ def _download_to(tmp_dir: Path, url: str, filename: str) -> Path:
     )
     try:
         print(f"Downloading skill bundle: {url}", file=sys.stderr)
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        with _open_public_request(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             final_url = getattr(response, "geturl", lambda: url)()
             _validate_public_url(str(final_url))
             path.write_bytes(_read_limited(response, MAX_SKILL_DOWNLOAD_BYTES))
@@ -1508,7 +1509,7 @@ def _fetch_text(url: str) -> str:
         headers=headers,
     )
     try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        with _open_public_request(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             final_url = getattr(response, "geturl", lambda: url)()
             _validate_public_url(str(final_url))
             data = _read_limited(response, MAX_SKILL_TEXT_BYTES)
@@ -1524,9 +1525,13 @@ def _download_error_message(url: str, exc: BaseException) -> str:
 
 
 def _validate_public_url(url: str) -> None:
-    from deepmate.tools.url_safety import validate_public_url
+    from deepmate.url_safety import validate_public_url
 
     validate_public_url(url)
+
+
+def _open_public_request(request: urllib.request.Request, *, timeout: int):
+    return open_public_request(request, timeout=timeout)
 
 
 def _read_limited(response: object, max_bytes: int) -> bytes:

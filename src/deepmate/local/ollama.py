@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
+import queue
 import re
 import shutil
 import subprocess
+import threading
 import time
+from collections import deque
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -18,9 +24,13 @@ from deepmate.domain import Message, MessageRole
 from deepmate.local.presets import LOCAL_PROVIDER_BASE_URL, LocalModelPreset
 from deepmate.local.state import LocalModelStateStore
 from deepmate.providers import ChatCompletionsProvider, ModelConversationItem, ModelRequest
+from deepmate.storage import file_lock
 
 OLLAMA_API_URL = "http://127.0.0.1:11434"
 MAX_OLLAMA_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
+LOCAL_MODEL_DISK_HEADROOM_BYTES = 512 * 1024 * 1024
+_PREPARE_LOCKS: dict[str, threading.Lock] = {}
+_PREPARE_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +64,19 @@ class LocalModelProgress:
 
 
 ProgressCallback = Callable[[LocalModelProgress], None]
+
+
+class LocalModelCancellationToken:
+    """Thread-safe cancellation signal for local-model preparation."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    def is_cancelled(self) -> bool:
+        return self._event.is_set()
 
 
 class OllamaLocalRuntime:
@@ -171,16 +194,72 @@ class OllamaLocalRuntime:
         progress: ProgressCallback | None = None,
         state_store: LocalModelStateStore | None = None,
         install_missing_runtime: bool = True,
+        cancellation_token: LocalModelCancellationToken | None = None,
+    ) -> LocalModelInstallResult:
+        """Prepare one model once across concurrent callers and processes."""
+        lock_key = f"{self._api_url}:{preset.id}"
+        with _prepare_lock(lock_key):
+            lock_context = nullcontext()
+            if state_store is not None and state_store.path is not None:
+                lock_context = file_lock(
+                    state_store.path.with_name(f".{preset.id}.prepare")
+                )
+            with lock_context:
+                return self._prepare_model_unlocked(
+                    preset,
+                    progress=progress,
+                    state_store=state_store,
+                    install_missing_runtime=install_missing_runtime,
+                    cancellation_token=cancellation_token,
+                )
+
+    def _prepare_model_unlocked(
+        self,
+        preset: LocalModelPreset,
+        *,
+        progress: ProgressCallback | None = None,
+        state_store: LocalModelStateStore | None = None,
+        install_missing_runtime: bool = True,
+        cancellation_token: LocalModelCancellationToken | None = None,
     ) -> LocalModelInstallResult:
         """Ensure Ollama is running and the requested model is available."""
+        previous = state_store.load() if state_store is not None else None
+        if (
+            previous is not None
+            and previous.model_id == preset.id
+            and previous.is_ready()
+        ):
+            status = self.ensure_ready()
+            if status.running and self.has_model(preset):
+                verified = self.health_check(preset)
+                if verified.ok:
+                    return LocalModelInstallResult(
+                        ok=True,
+                        preset=preset,
+                        message=f"{preset.label} 已就绪。",
+                        provider_base_url=self.provider_base_url,
+                    )
+        if _cancelled(cancellation_token):
+            return _cancelled_result(preset, state_store)
+        resuming = (
+            previous is not None
+            and previous.model_id == preset.id
+            and previous.is_incomplete()
+        )
         _emit_progress(
             progress,
-            "checking",
-            f"正在检查本地环境 · {preset.short_label}",
+            "resuming" if resuming else "checking",
+            (
+                f"正在继续上次的本地模型准备 · {preset.short_label}"
+                if resuming
+                else f"正在检查本地环境 · {preset.short_label}"
+            ),
             preset=preset,
             state_store=state_store,
         )
         status = self.ensure_ready()
+        if _cancelled(cancellation_token):
+            return _cancelled_result(preset, state_store)
         if not status.installed and not install_missing_runtime:
             result = LocalModelInstallResult(
                 ok=False,
@@ -210,6 +289,8 @@ class OllamaLocalRuntime:
                 state_store=state_store,
             )
             status = self.ensure_ready()
+            if _cancelled(cancellation_token):
+                return _cancelled_result(preset, state_store)
         if not status.running:
             _record_state(
                 state_store,
@@ -225,10 +306,21 @@ class OllamaLocalRuntime:
                 message="本地模型服务暂时没有启动成功，请稍后重试 /local。",
             )
         if not self.has_model(preset):
-            pulled = self.pull(preset, progress=progress, state_store=state_store)
+            disk_result = self.disk_preflight(preset)
+            if disk_result is not None:
+                _record_result(state_store, disk_result)
+                return disk_result
+            pulled = self.pull(
+                preset,
+                progress=progress,
+                state_store=state_store,
+                cancellation_token=cancellation_token,
+            )
             if not pulled.ok:
                 _record_result(state_store, pulled)
                 return pulled
+        if _cancelled(cancellation_token):
+            return _cancelled_result(preset, state_store)
         if preset.runtime_name != preset.ollama_ref and not self.has_runtime_model(preset):
             created = self.create_runtime_alias(preset)
             if not created.ok:
@@ -247,30 +339,13 @@ class OllamaLocalRuntime:
             time.sleep(0.5)
             verified = self.health_check(preset)
             if not verified.ok:
-                if self.has_runtime_model(preset):
-                    _record_state(
-                        state_store,
-                        preset,
-                        "ready",
-                        (
-                            f"{preset.label} 已下载并可由 Ollama 发现；"
-                            "本次跳过接口试答，后续对话将直接使用本地模型。"
-                        ),
-                        status="ready",
-                    )
-                    return LocalModelInstallResult(
-                        ok=True,
-                        preset=preset,
-                        message=(
-                            f"{preset.label} 已下载并可由 Ollama 发现；"
-                            "本次跳过接口试答，后续对话将直接使用本地模型。"
-                        ),
-                        provider_base_url=self.provider_base_url,
-                    )
                 result = LocalModelInstallResult(
                     ok=False,
                     preset=preset,
-                    message="本地模型暂时没有准备成功，已继续使用当前模型。稍后可以再次输入 /local。",
+                    message=(
+                        f"{preset.label} 已安装，但本地推理接口连续两次验证失败。"
+                        "已继续使用当前模型；确认 Ollama 可正常生成回复后再重试 /local。"
+                    ),
                 )
                 _record_state(
                     state_store,
@@ -403,12 +478,40 @@ class OllamaLocalRuntime:
             message=f"{preset.label} 已注册。",
         )
 
+    def disk_preflight(
+        self,
+        preset: LocalModelPreset,
+    ) -> LocalModelInstallResult | None:
+        """Return a failure when the Ollama model volume lacks safe headroom."""
+        required = _preset_download_bytes(preset) + LOCAL_MODEL_DISK_HEADROOM_BYTES
+        model_root = Path(os.environ.get("OLLAMA_MODELS", "")).expanduser()
+        if not str(model_root).strip() or str(model_root) == ".":
+            model_root = Path.home() / ".ollama" / "models"
+        probe = model_root
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        try:
+            free = shutil.disk_usage(probe).free
+        except OSError:
+            return None
+        if free >= required:
+            return None
+        return LocalModelInstallResult(
+            ok=False,
+            preset=preset,
+            message=(
+                f"磁盘空间不足，{preset.label} 预计需要至少 "
+                f"{_format_gib(required)} 可用空间，当前约 {_format_gib(free)}。"
+            ),
+        )
+
     def pull(
         self,
         preset: LocalModelPreset,
         *,
         progress: ProgressCallback | None = None,
         state_store: LocalModelStateStore | None = None,
+        cancellation_token: LocalModelCancellationToken | None = None,
     ) -> LocalModelInstallResult:
         """Download one model through Ollama."""
         command = ("ollama", "pull", preset.ollama_ref)
@@ -438,29 +541,44 @@ class OllamaLocalRuntime:
                 preset=preset,
                 message=f"{preset.label} 下载没有完成：{exc}",
             )
-        output_lines: list[str] = []
+        output_lines: deque[str] = deque(maxlen=20)
         deadline = time.monotonic() + 60 * 60
+        stream_events: queue.Queue[str | None] = queue.Queue(maxsize=128)
+        assert process.stdout is not None
+
+        def read_output() -> None:
+            try:
+                while True:
+                    line = process.stdout.readline()
+                    if line == "":
+                        break
+                    stream_events.put(line)
+            except (OSError, ValueError):
+                pass
+            finally:
+                try:
+                    stream_events.put_nowait(None)
+                except queue.Full:
+                    pass
+
+        reader = threading.Thread(
+            target=read_output,
+            name="deepmate-ollama-pull-output",
+            daemon=True,
+        )
+        reader.start()
+        stream_ended = False
         try:
-            assert process.stdout is not None
             while True:
-                line = process.stdout.readline()
-                if line:
-                    clean = line.strip()
-                    if clean:
-                        output_lines.append(clean)
-                    percent = _progress_percent(line)
-                    if percent is not None:
-                        _emit_progress(
-                            progress,
-                            "downloading",
-                            f"正在下载本地模型 · {preset.short_label} · {percent}%",
-                            percent=percent,
-                            preset=preset,
-                            state_store=state_store,
-                        )
-                if line == "" and process.poll() is not None:
-                    break
-                if time.monotonic() > deadline:
+                if _cancelled(cancellation_token):
+                    process.kill()
+                    try:
+                        process.wait(timeout=5)
+                    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+                        pass
+                    return _cancelled_result(preset, state_store)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     process.kill()
                     try:
                         process.wait(timeout=5)
@@ -480,12 +598,38 @@ class OllamaLocalRuntime:
                         failure_kind="download_timeout",
                     )
                     return result
+                try:
+                    event = stream_events.get(timeout=min(0.25, remaining))
+                except queue.Empty:
+                    if process.poll() is not None and stream_events.empty():
+                        break
+                    continue
+                if event is None:
+                    stream_ended = True
+                else:
+                    line = event
+                    clean = line.strip()
+                    if clean:
+                        output_lines.append(clean)
+                    percent = _progress_percent(line)
+                    if percent is not None:
+                        _emit_progress(
+                            progress,
+                            "downloading",
+                            f"正在下载本地模型 · {preset.short_label} · {percent}%",
+                            percent=percent,
+                            preset=preset,
+                            state_store=state_store,
+                        )
+                if stream_ended and process.poll() is not None and stream_events.empty():
+                    break
         finally:
             if process.stdout is not None:
                 process.stdout.close()
+            reader.join(timeout=0.2)
         returncode = process.wait()
         if returncode != 0:
-            output = "\n".join(output_lines[-3:]).strip()
+            output = "\n".join(tuple(output_lines)[-3:]).strip()
             detail = f"：{output}" if output else ""
             return LocalModelInstallResult(
                 ok=False,
@@ -584,6 +728,48 @@ def _ollama_short_name(value: str) -> str:
     if clean.startswith("hf.co/"):
         return clean.rsplit("/", 1)[-1]
     return clean
+
+
+def _prepare_lock(key: str) -> threading.Lock:
+    with _PREPARE_LOCKS_GUARD:
+        lock = _PREPARE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _PREPARE_LOCKS[key] = lock
+        return lock
+
+
+def _preset_download_bytes(preset: LocalModelPreset) -> int:
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(gb|mb)", preset.size_label, re.IGNORECASE)
+    if match is None:
+        return 1024**3
+    value = float(match.group(1))
+    multiplier = 1024**3 if match.group(2).lower() == "gb" else 1024**2
+    return max(1, int(value * multiplier * 1.15))
+
+
+def _format_gib(value: int) -> str:
+    return f"{value / (1024**3):.1f} GiB"
+
+
+def _cancelled(token: LocalModelCancellationToken | None) -> bool:
+    return token is not None and token.is_cancelled()
+
+
+def _cancelled_result(
+    preset: LocalModelPreset,
+    state_store: LocalModelStateStore | None,
+) -> LocalModelInstallResult:
+    message = "本地模型准备已取消；再次输入 /local 会从 Ollama 已下载的分层继续。"
+    _record_state(
+        state_store,
+        preset,
+        "cancelled",
+        message,
+        status="failed",
+        failure_kind="cancelled",
+    )
+    return LocalModelInstallResult(ok=False, preset=preset, message=message)
 
 
 def _emit_progress(

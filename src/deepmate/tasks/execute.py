@@ -129,36 +129,45 @@ def evaluate_execute_progress(
             reason="The runtime reached max_steps before a normal final answer.",
             next_instruction="Resume execute after addressing the max_steps stop.",
         )
-    if turns >= max(1, turn_budget):
+    if provider is None:
+        evaluation = heuristic_execute_evaluation(documents, evidence)
+    else:
+        request = ModelRequest(
+            model=model,
+            conversation=(
+                ModelConversationItem.from_message(
+                    Message(role=MessageRole.SYSTEM, content=EXECUTE_EVALUATOR_PROMPT)
+                ),
+                ModelConversationItem.from_message(
+                    Message(
+                        role=MessageRole.USER,
+                        content=_evaluation_user_prompt(
+                            documents=documents,
+                            evidence=evidence,
+                            turns=turns,
+                            turn_budget=turn_budget,
+                        ),
+                    )
+                ),
+            ),
+            options={"temperature": 0, "max_tokens": 700},
+        )
+        response = provider.complete(request)
+        evaluation = parse_execute_evaluation(response.content)
+    if (
+        evaluation.decision == ExecuteDecision.CONTINUE
+        and turns >= max(1, turn_budget)
+    ):
         return ExecuteEvaluation(
             decision=ExecuteDecision.BUDGET_LIMITED,
             reason=f"Execute turn budget reached: {turns}/{turn_budget}.",
-            next_instruction="Review remaining acceptance items and resume task/execute if needed.",
+            next_instruction=(
+                evaluation.next_instruction
+                or "Review remaining acceptance items and resume task/execute if needed."
+            ),
+            contract_status=evaluation.contract_status,
         )
-    if provider is None:
-        return heuristic_execute_evaluation(documents, evidence)
-    request = ModelRequest(
-        model=model,
-        conversation=(
-            ModelConversationItem.from_message(
-                Message(role=MessageRole.SYSTEM, content=EXECUTE_EVALUATOR_PROMPT)
-            ),
-            ModelConversationItem.from_message(
-                Message(
-                    role=MessageRole.USER,
-                    content=_evaluation_user_prompt(
-                        documents=documents,
-                        evidence=evidence,
-                        turns=turns,
-                        turn_budget=turn_budget,
-                    ),
-                )
-            ),
-        ),
-        options={"temperature": 0, "max_tokens": 700},
-    )
-    response = provider.complete(request)
-    return parse_execute_evaluation(response.content)
+    return evaluation
 
 
 def heuristic_execute_evaluation(

@@ -10,10 +10,10 @@ Deepmate is a cost-first local AI workbench for long-running project work, with 
 
 ## Highlights
 
-- **Prefix cache** — Freeze context snapshots and keep stable prefixes reusable, reducing the cost of repeatedly sending the same project background in long sessions.
-- **Cost governance** — Keep skills and capabilities hot/cold, load MCP schemas and tools on demand, compact large outputs, and retrieve detail only when needed.
-- **Local model deployment** — Prepare, check, and switch Ollama-backed models from Deepmate, keeping suitable work on local models to reduce cost.
-- **Self-evolution** — Mine traces, sessions, failures, corrections, and successful workflows into behavior hints, failure guards, generated skill drafts, and capability state.
+- **Prefix cache** — Freeze consistent context snapshots and reuse content-generation-stable prefixes, reducing repeated project-background cost across long sessions.
+- **Cost governance** — Keep skills and capabilities hot/cold, bound and validate paginated MCP schemas, compact large outputs, and retrieve detail only when needed.
+- **Local model deployment** — Preflight disk space, resume or cancel Ollama downloads, deduplicate concurrent preparation, verify inference, and switch models from Deepmate.
+- **Self-evolution** — Mine scoped, confidence-filtered traces, sessions, activity notes, corrections, and successful workflows into auditable behavior hints, failure guards, generated skill drafts, and capability state.
 
 ## Install
 
@@ -121,6 +121,10 @@ Useful TUI commands:
 /session tree                  Inspect session lineage.
 /approvals                     Review approval history for the current session.
 ```
+
+A direct single-HTML preview serves only that selected file. For pages with relative
+CSS, JavaScript, or image assets, preview a directory containing `index.html` instead.
+Preview directory listings, sensitive paths, and symlink escapes are blocked.
 
 ## CLI Reference
 

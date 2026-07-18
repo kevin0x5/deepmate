@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from deepmate.capabilities import CapabilitySurface
+from deepmate.context import build_profile_context_snapshot
 from deepmate.domain import CapabilityKind, CapabilityRef
 from deepmate.domain import Message, MessageRole, ProfileRef
 from deepmate.providers import (
@@ -321,6 +322,47 @@ class SessionRuntimeTests(unittest.TestCase):
             self.assertIn("behavior_context_changed", event_kinds)
             self.assertIn("context_snapshot_refreshed", event_kinds)
 
+    def test_behavior_context_refresh_preserves_frozen_extra_sections(self) -> None:
+        with _workspace() as workspace:
+            profile = ProfileRef(name="default", uri="profiles/default")
+            snapshot = build_profile_context_snapshot(
+                workspace=workspace,
+                profile=profile,
+                extra_sections=(
+                    "<task_context><stage>execute</stage></task_context>",
+                ),
+            )
+            activation = start_runtime_activation(
+                session_id="session_1",
+                workspace=workspace,
+                profile=profile,
+                context_snapshot=snapshot,
+            )
+            runtime = start_session_runtime(activation)
+            behavior_path = workspace / ".deepmate" / "behavior.md"
+            behavior_path.parent.mkdir()
+            behavior_path.write_text(
+                "# Behavior Hints\n\n- Prefer compact closure.\n",
+                encoding="utf-8",
+            )
+            provider = StubProvider(ModelResponse(content="ok"))
+
+            result = runtime.run_user_turn(
+                provider=provider,
+                messages=(Message(role=MessageRole.USER, content="继续"),),
+                model="stub-model",
+            )
+
+            self.assertEqual(result.runtime.activation.context_epoch, 2)
+            self.assertEqual(
+                result.runtime.activation.context_snapshot.extra_sections,
+                ("<task_context><stage>execute</stage></task_context>",),
+            )
+            system_message = provider.requests[0].conversation[0].message
+            self.assertIsNotNone(system_message)
+            self.assertIn("<task_context>", system_message.content)
+            self.assertIn("Prefer compact closure.", system_message.content)
+
     def test_history_budget_pressure_requests_next_context_refresh(self) -> None:
         with _workspace() as workspace:
             profile = ProfileRef(name="default", uri="profiles/default")
@@ -411,6 +453,48 @@ class SessionRuntimeTests(unittest.TestCase):
                 "system_context_cache_hit",
                 "system_context_cache_miss",
             ],
+        )
+
+    def test_identical_refreshed_snapshot_reuses_system_context_generation(self) -> None:
+        with _workspace() as workspace:
+            profile = ProfileRef(name="default", uri="profiles/default")
+            activation = start_runtime_activation(
+                session_id="session_1",
+                workspace=workspace,
+                profile=profile,
+            )
+            runtime = start_session_runtime(activation)
+            provider = StubProvider(
+                [ModelResponse(content="first"), ModelResponse(content="second")]
+            )
+            trace_sink = _TraceSink()
+
+            first = runtime.run_user_turn(
+                provider=provider,
+                messages=(Message(role=MessageRole.USER, content="first"),),
+                model="stub-model",
+                trace_recorder=TraceRecorder(trace_sink),
+            )
+            identical = build_profile_context_snapshot(
+                workspace=workspace,
+                profile=profile,
+            )
+            refreshed = first.runtime.with_refreshed_context(identical)
+            refreshed.run_user_turn(
+                provider=provider,
+                messages=(Message(role=MessageRole.USER, content="second"),),
+                model="stub-model",
+                trace_recorder=TraceRecorder(trace_sink),
+            )
+
+        cache_events = [
+            event.kind
+            for event in trace_sink.events
+            if event.kind in {"system_context_cache_hit", "system_context_cache_miss"}
+        ]
+        self.assertEqual(
+            cache_events,
+            ["system_context_cache_miss", "system_context_cache_hit"],
         )
 
     def test_capability_order_change_invalidates_system_context_cache(self) -> None:

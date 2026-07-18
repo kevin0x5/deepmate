@@ -23,6 +23,8 @@ class ContextFileRef:
     sha256: str = ""
     estimated_tokens: int = 0
     warning_code: str = ""
+    mtime_ns: int = 0
+    read_stable: bool = True
 
     def is_loaded(self) -> bool:
         """Return whether this file contributed prompt content."""
@@ -79,6 +81,8 @@ class ProfileContextSnapshot:
     hot_profile_warn_tokens: int = 0
     hot_profile_estimated_tokens: int = 0
     pending_refresh_reason: str = ""
+    extra_sections: tuple[str, ...] = field(default_factory=tuple)
+    generation: str = ""
 
     def is_ready(self) -> bool:
         """Return whether the snapshot has readable context sections."""
@@ -91,6 +95,7 @@ class ProfileContextSnapshot:
     def trace_refs(self) -> tuple[str, ...]:
         """Return compact refs suitable for context trace events."""
         refs = (
+            f"context_generation={self.generation[:12]}",
             f"loaded_sections={','.join(self.loaded_section_names())}",
             f"hot_profile_estimated_tokens={self.hot_profile_estimated_tokens}",
             f"hot_profile_token_budget={self.hot_profile_token_budget}",
@@ -98,6 +103,8 @@ class ProfileContextSnapshot:
         )
         if self.pending_refresh_reason:
             refs = (*refs, f"pending_refresh_reason={self.pending_refresh_reason}")
+        if self.extra_sections:
+            refs = (*refs, f"extra_sections={len(self.extra_sections)}")
         for file_ref in self.file_refs:
             refs = (*refs, *file_ref.trace_refs())
         return refs

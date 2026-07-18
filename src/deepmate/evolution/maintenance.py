@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -47,12 +48,26 @@ from deepmate.evolution.generated_skills import (
     generated_skill_drafts_from_workflows,
 )
 from deepmate.foundation import utc_isoformat
-from deepmate.storage import JsonlWriter, atomic_write_json, atomic_write_text
+from deepmate.storage import JsonlWriter, atomic_write_json, atomic_write_text, file_lock
 from deepmate.storage.session_store import SessionRecord, SessionStore
 from deepmate.trace import TraceEvent, TraceRecorder
 
 EVOLUTION_MAINTENANCE_STATE_FILE = "maintenance_state.json"
 EVOLUTION_FITNESS_METRICS_FILE = "fitness_metrics.jsonl"
+SENSITIVE_BEHAVIOR_HINT_PATTERNS = (
+    re.compile(
+        r"\b(?:api[ _-]?key|access[ _-]?token|password|passwd|secret|"
+        r"user[ _-]?name|account(?:[ _-]?id)?|phone|mobile)\b\s*[:=]",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:bearer\s+|sk-|ghp_|github_pat_)[A-Za-z0-9._-]{8,}", re.IGNORECASE),
+    re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
+    re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
+    re.compile(r"(?i)\b(?:[0-9a-f]{1,4}:){2,}[0-9a-f:]{1,4}\b"),
+    re.compile(r"(?<!\d)(?:\+\d[\d ()-]{7,}\d|\d{10,15})(?!\d)"),
+    re.compile(r"(?:/Users/|/home/)[^\s]+"),
+    re.compile(r"\b[A-Za-z]:\\Users\\[^\s]+", re.IGNORECASE),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +175,37 @@ def run_evolution_maintenance(
     trace_recorder: TraceRecorder | None = None,
     force: bool = False,
 ) -> EvolutionMaintenanceResult:
+    """Run one profile's maintenance exclusively."""
+    profile_name = profile.name.strip() or "default"
+    lock_path = Path(data_dir) / "evolution" / profile_name / ".maintenance"
+    with file_lock(lock_path):
+        return _run_evolution_maintenance_unlocked(
+            workspace=workspace,
+            data_dir=data_dir,
+            profile=profile,
+            now=now,
+            trace_path=trace_path,
+            sessions_dir=sessions_dir,
+            activity_dir=activity_dir,
+            evidence_records=evidence_records,
+            trace_recorder=trace_recorder,
+            force=force,
+        )
+
+
+def _run_evolution_maintenance_unlocked(
+    *,
+    workspace: str | Path,
+    data_dir: str | Path,
+    profile: ProfileRef,
+    now: datetime | None = None,
+    trace_path: str | Path | None = None,
+    sessions_dir: str | Path | None = None,
+    activity_dir: str | Path | None = None,
+    evidence_records: tuple[Mapping[str, object], ...] = (),
+    trace_recorder: TraceRecorder | None = None,
+    force: bool = False,
+) -> EvolutionMaintenanceResult:
     """Run deterministic self-evolution maintenance for new signals."""
     workspace_path = Path(workspace)
     data_path = Path(data_dir)
@@ -181,6 +227,8 @@ def run_evolution_maintenance(
         window_start,
     )
     activity_paths = _activity_paths_since(activity_dir, window_start)
+    session_evidence_records = _session_evidence_records(session_records)
+    activity_evidence_records = _activity_evidence_records(activity_paths)
     behavior_paths = _behavior_paths_since(workspace_path, profile, window_start)
     capability_states = _capability_states_since(capability_state_store, window_start)
     applied_changes = _changes_since(store, window_start)
@@ -260,19 +308,25 @@ def run_evolution_maintenance(
         if change is not None:
             if _remember_changed_path(changed_paths, changed_path_keys, target_path):
                 behavior_change_count += 1
-    evidence_batch = collect_evidence_from_records((*trace_records, *explicit_records))
-    behavior_change = _apply_behavior_hints_from_evidence(
+    evidence_records_all = (
+        *trace_records,
+        *explicit_records,
+        *session_evidence_records,
+        *activity_evidence_records,
+    )
+    evidence_batch = collect_evidence_from_records(evidence_records_all)
+    behavior_changes = _apply_behavior_hints_from_evidence(
         workspace=workspace_path,
         data_dir=data_path,
         profile=profile,
         evidence_batch=evidence_batch,
         now=current_time,
     )
-    if behavior_change is not None:
+    for behavior_change, target_path in behavior_changes:
         if _remember_changed_path(
             changed_paths,
             changed_path_keys,
-            workspace_behavior_path(workspace_path),
+            target_path,
         ):
             behavior_change_count += 1
     updated_patterns = update_failure_patterns_from_evidence(
@@ -400,23 +454,24 @@ def apply_behavior_hint_change(
         if clean_scope == "profile"
         else workspace_behavior_path(workspace_path)
     )
-    old_exists = target_path.exists()
-    old_content = target_path.read_text(encoding="utf-8") if old_exists else ""
-    merged_hints = normalize_behavior_hints(
-        (*extract_behavior_hints(old_content), *clean_hints)
-    )
-    new_content = replace_behavior_hints_section(old_content, merged_hints)
-    return _apply_behavior_file_update(
-        target_path=target_path,
-        workspace=workspace_path,
-        store=EvolutionChangeStore.in_data_dir(data_dir, profile),
-        old_content=old_content,
-        new_content=new_content,
-        old_exists=old_exists,
-        summary=summary,
-        evidence_refs=evidence_refs,
-        now=now or datetime.now().astimezone(),
-    )
+    with file_lock(target_path):
+        old_exists = target_path.exists()
+        old_content = target_path.read_text(encoding="utf-8") if old_exists else ""
+        merged_hints = normalize_behavior_hints(
+            (*extract_behavior_hints(old_content), *clean_hints)
+        )
+        new_content = replace_behavior_hints_section(old_content, merged_hints)
+        return _apply_behavior_file_update(
+            target_path=target_path,
+            workspace=workspace_path,
+            store=EvolutionChangeStore.in_data_dir(data_dir, profile),
+            old_content=old_content,
+            new_content=new_content,
+            old_exists=old_exists,
+            summary=summary,
+            evidence_refs=evidence_refs,
+            now=now or datetime.now().astimezone(),
+        )
 
 
 def _normalize_existing_behavior_file(
@@ -426,25 +481,26 @@ def _normalize_existing_behavior_file(
     store: EvolutionChangeStore,
     now: datetime,
 ) -> EvolutionChange | None:
-    if not target_path.exists():
-        return None
-    old_content = target_path.read_text(encoding="utf-8")
-    hints = extract_behavior_hints(old_content)
-    if not hints:
-        return None
-    normalized_hints = normalize_behavior_hints(hints)
-    new_content = replace_behavior_hints_section(old_content, normalized_hints)
-    return _apply_behavior_file_update(
-        target_path=target_path,
-        workspace=workspace,
-        store=store,
-        old_content=old_content,
-        new_content=new_content,
-        old_exists=True,
-        summary="Normalized behavior hints.",
-        evidence_refs=("maintenance=behavior_normalization",),
-        now=now,
-    )
+    with file_lock(target_path):
+        if not target_path.exists():
+            return None
+        old_content = target_path.read_text(encoding="utf-8")
+        hints = extract_behavior_hints(old_content)
+        if not hints:
+            return None
+        normalized_hints = normalize_behavior_hints(hints)
+        new_content = replace_behavior_hints_section(old_content, normalized_hints)
+        return _apply_behavior_file_update(
+            target_path=target_path,
+            workspace=workspace,
+            store=store,
+            old_content=old_content,
+            new_content=new_content,
+            old_exists=True,
+            summary="Normalized behavior hints.",
+            evidence_refs=("maintenance=behavior_normalization",),
+            now=now,
+        )
 
 
 def _apply_behavior_hints_from_evidence(
@@ -454,35 +510,71 @@ def _apply_behavior_hints_from_evidence(
     profile: ProfileRef,
     evidence_batch: EvolutionEvidenceBatch,
     now: datetime,
-) -> EvolutionChange | None:
-    hints = _behavior_hints_from_user_corrections(evidence_batch)
-    if not hints:
-        return None
-    return apply_behavior_hint_change(
-        workspace=workspace,
-        data_dir=data_dir,
-        profile=profile,
-        hints=hints,
-        target_scope="workspace",
-        summary="Added behavior hints from repeated user corrections.",
-        evidence_refs=tuple(
-            ref
-            for aggregate in user_correction_candidates(evidence_batch.user_corrections)
-            for ref in aggregate.source_refs
-        ),
-        now=now,
-    )
-
-
-def _behavior_hints_from_user_corrections(
-    evidence_batch: EvolutionEvidenceBatch,
-) -> tuple[str, ...]:
-    hints: list[str] = []
+) -> tuple[tuple[EvolutionChange, Path], ...]:
+    scoped: dict[str, list[tuple[str, tuple[str, ...]]]] = {
+        "workspace": [],
+        "profile": [],
+    }
     for aggregate in user_correction_candidates(evidence_batch.user_corrections):
         correction = _best_user_correction_hint(aggregate.examples)
-        if correction:
-            hints.append(correction)
-    return normalize_behavior_hints(tuple(hints))
+        if not correction:
+            continue
+        scope = _behavior_hint_scope(correction, evidence_batch)
+        scoped[scope].append((correction, aggregate.source_refs))
+    changes: list[tuple[EvolutionChange, Path]] = []
+    for scope, candidates in scoped.items():
+        hints = normalize_behavior_hints(tuple(item[0] for item in candidates))
+        if not hints:
+            continue
+        change = apply_behavior_hint_change(
+            workspace=workspace,
+            data_dir=data_dir,
+            profile=profile,
+            hints=hints,
+            target_scope=scope,
+            summary="Added behavior hints from repeated user corrections.",
+            evidence_refs=tuple(
+                ref for _, refs in candidates for ref in refs
+            ),
+            now=now,
+        )
+        if change is not None:
+            target = (
+                profile_behavior_path(workspace, profile)
+                if scope == "profile"
+                else workspace_behavior_path(workspace)
+            )
+            changes.append((change, target))
+    return tuple(changes)
+
+
+def _behavior_hint_scope(correction: str, batch: EvolutionEvidenceBatch) -> str:
+    matching = [
+        evidence
+        for evidence in batch.user_corrections
+        if " ".join(evidence.correction.split()).lower() == correction.lower()
+    ]
+    explicit = {
+        evidence.target_scope.strip().lower()
+        for evidence in matching
+        if evidence.target_scope.strip().lower() in {"workspace", "profile"}
+    }
+    if len(explicit) == 1:
+        return explicit.pop()
+    clean = correction.lower()
+    profile_markers = (
+        "i prefer",
+        "my preference",
+        "call me ",
+        "respond in ",
+        "reply in ",
+        "always be concise",
+        "我偏好",
+        "请称呼我",
+        "始终用中文",
+        "始终使用中文",
+    )
+    return "profile" if any(marker in clean for marker in profile_markers) else "workspace"
 
 
 def _best_user_correction_hint(examples: tuple[str, ...]) -> str:
@@ -496,6 +588,8 @@ def _best_user_correction_hint(examples: tuple[str, ...]) -> str:
 def _clean_behavior_hint_candidate(value: str) -> str:
     text = " ".join(value.strip().split())
     if not text:
+        return ""
+    if any(pattern.search(text) for pattern in SENSITIVE_BEHAVIOR_HINT_PATTERNS):
         return ""
     if len(text) > 180:
         text = text[:177].rstrip() + "..."
@@ -534,7 +628,19 @@ def _apply_behavior_file_update(
         evidence_refs=evidence_refs,
         now_iso=utc_isoformat(now),
     )
-    store.append(change)
+    try:
+        store.append(change)
+    except Exception as append_error:
+        try:
+            if old_exists:
+                atomic_write_text(target_path, old_content)
+            else:
+                target_path.unlink(missing_ok=True)
+        except OSError:
+            raise RuntimeError(
+                f"behavior audit append failed and rollback was incomplete: {target_path}"
+            ) from append_error
+        raise
     return change
 
 
@@ -644,6 +750,142 @@ def _activity_paths_since(
         if since is None or _normal_datetime(modified_at) > since:
             paths.append(path)
     return tuple(paths)
+
+
+def _session_evidence_records(
+    sessions: tuple[SessionRecord, ...],
+) -> tuple[Mapping[str, object], ...]:
+    records: list[Mapping[str, object]] = []
+    for session in sessions:
+        transcript_records = _read_transcript_records(session.transcript_path)
+        successful_tools: list[str] = []
+        for record in transcript_records:
+            payload = record.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+            if record.get("kind") == "message" and payload.get("role") == "user":
+                correction = _explicit_correction(_text(payload.get("content")))
+                if correction:
+                    records.append(
+                        {
+                            "kind": "user_correction",
+                            "signature": correction,
+                            "correction": correction,
+                            "confidence": "0.7",
+                            "source_group": f"session:{session.session_id}",
+                            "source_ref": (
+                                f"session:{session.session_id}:"
+                                f"sequence:{record.get('sequence', 0)}"
+                            ),
+                        }
+                    )
+            if record.get("kind") != "tool_exchange":
+                continue
+            raw_results = payload.get("tool_results")
+            if not isinstance(raw_results, list) or any(
+                isinstance(result, Mapping) and result.get("is_error") is True
+                for result in raw_results
+            ):
+                continue
+            for result in raw_results:
+                if not isinstance(result, Mapping):
+                    continue
+                name = _text(result.get("name"))
+                if name and name not in successful_tools:
+                    successful_tools.append(name)
+        if len(successful_tools) >= 2:
+            workflow_name = _workflow_name_from_tools(successful_tools)
+            records.append(
+                {
+                    "kind": "workflow_success",
+                    "signature": " -> ".join(successful_tools),
+                    "name": workflow_name,
+                    "description": "Repeat a validated sequence of successful tool calls.",
+                    "steps": [f"Call {name}." for name in successful_tools],
+                    "confidence": "0.65",
+                    "source_group": f"session:{session.session_id}",
+                    "source_ref": f"session:{session.session_id}:workflow",
+                }
+            )
+    return tuple(records)
+
+
+def _workflow_name_from_tools(tool_names: list[str]) -> str:
+    """Build a non-personal workflow name without copying the session title."""
+    labels = []
+    for tool_name in tool_names[:3]:
+        label = " ".join(re.findall(r"[A-Za-z0-9]+", tool_name)).title()
+        if label:
+            labels.append(label)
+    return f"{' '.join(labels)} Workflow" if labels else "Generated Tool Workflow"
+
+
+def _read_transcript_records(path: Path) -> tuple[Mapping[str, object], ...]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return ()
+    records: list[Mapping[str, object]] = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, Mapping):
+            records.append(record)
+    return tuple(records)
+
+
+def _activity_evidence_records(
+    paths: tuple[Path, ...],
+) -> tuple[Mapping[str, object], ...]:
+    records: list[Mapping[str, object]] = []
+    for path in paths:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for section in re.split(r"(?m)^## ", content)[1:]:
+            fields: dict[str, str] = {}
+            for line in section.splitlines()[1:]:
+                match = re.match(r"^- ([a-z_]+):\s*(.+)$", line.strip())
+                if match:
+                    fields[match.group(1)] = match.group(2).strip()
+            correction = _explicit_correction(fields.get("summary", ""))
+            session_id = fields.get("session_id", "")
+            if correction and session_id:
+                records.append(
+                    {
+                        "kind": "user_correction",
+                        "signature": correction,
+                        "correction": correction,
+                        "confidence": "0.6",
+                        "source_group": f"session:{session_id}",
+                        "source_ref": f"activity:{path.name}:session:{session_id}",
+                    }
+                )
+    return tuple(records)
+
+
+def _explicit_correction(content: str) -> str:
+    clean = " ".join(content.strip().split())
+    if not clean:
+        return ""
+    prefixes = (
+        "correction:",
+        "user correction:",
+        "纠正：",
+        "更正：",
+    )
+    lower = clean.lower()
+    for prefix in prefixes:
+        if lower.startswith(prefix.lower()):
+            return clean[len(prefix) :].strip()
+    if lower.startswith(("do not ", "don't ", "always ", "never ")):
+        return clean
+    if clean.startswith(("不要", "请始终", "以后不要", "以后请")):
+        return clean
+    return ""
 
 
 def _behavior_paths_since(

@@ -337,6 +337,88 @@ class McpProgressiveDisclosureTests(unittest.TestCase):
         self.assertEqual(tools[0].output_schema, {"type": "object"})
         self.assertEqual(tools[0].meta, {"source": "test"})
 
+    def test_stdio_list_tools_rejects_repeated_pagination_cursor(self) -> None:
+        client = _PagedMcpClient()
+        client._request = lambda method, params: {  # type: ignore[method-assign]
+            "result": {"tools": [], "nextCursor": "same-page"}
+        }
+
+        with self.assertRaisesRegex(McpClientError, "repeated pagination cursor"):
+            client.list_tools()
+
+    def test_stdio_list_tools_enforces_discovered_tool_limit(self) -> None:
+        client = _PagedMcpClient()
+
+        with (
+            patch("deepmate.mcp.client.MAX_MCP_DISCOVERED_TOOLS", 1),
+            self.assertRaisesRegex(McpClientError, "discovered tool limit"),
+        ):
+            client.list_tools()
+
+    def test_stdio_list_tools_deduplicates_identical_tool_across_pages(self) -> None:
+        client = _PagedMcpClient()
+        page = {"name": "same", "inputSchema": {"type": "object"}}
+        responses = iter(
+            (
+                {"result": {"tools": [page], "nextCursor": "page-2"}},
+                {"result": {"tools": [page]}},
+            )
+        )
+        client._request = lambda method, params: next(responses)  # type: ignore[method-assign]
+
+        tools = client.list_tools()
+
+        self.assertEqual([tool.name for tool in tools], ["same"])
+
+    def test_stdio_list_tools_rejects_conflicting_duplicate_tool(self) -> None:
+        client = _PagedMcpClient()
+        responses = iter(
+            (
+                {
+                    "result": {
+                        "tools": [{"name": "same", "description": "first"}],
+                        "nextCursor": "page-2",
+                    }
+                },
+                {
+                    "result": {
+                        "tools": [{"name": "same", "description": "changed"}]
+                    }
+                },
+            )
+        )
+        client._request = lambda method, params: next(responses)  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(McpClientError, "conflicting duplicate tool"):
+            client.list_tools()
+
+    def test_stdio_list_tools_enforces_schema_bytes_and_depth(self) -> None:
+        client = _PagedMcpClient()
+        client._request = lambda method, params: {  # type: ignore[method-assign]
+            "result": {
+                "tools": [
+                    {
+                        "name": "large",
+                        "inputSchema": {"description": "x" * 100},
+                    }
+                ]
+            }
+        }
+        with (
+            patch("deepmate.mcp.client.MAX_MCP_TOTAL_SCHEMA_BYTES", 20),
+            self.assertRaisesRegex(McpClientError, "schema byte limit"),
+        ):
+            client.list_tools()
+
+        nested: dict[str, object] = {"type": "string"}
+        for _ in range(35):
+            nested = {"next": nested}
+        client._request = lambda method, params: {  # type: ignore[method-assign]
+            "result": {"tools": [{"name": "deep", "inputSchema": nested}]}
+        }
+        with self.assertRaisesRegex(McpClientError, "nesting depth limit"):
+            client.list_tools()
+
     def test_stdio_request_matches_string_jsonrpc_id_and_counts_skips(self) -> None:
         client = _BoundaryMcpClient()
         messages = iter(

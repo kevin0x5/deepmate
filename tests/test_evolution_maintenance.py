@@ -11,6 +11,7 @@ from deepmate.capabilities import (
     CapabilityStateStore,
     CapabilityTemperature,
 )
+from deepmate.activity import ActivityEntry, ActivityStore
 from deepmate.domain import ProfileRef
 from deepmate.evolution import (
     EvolutionChangeStore,
@@ -20,6 +21,7 @@ from deepmate.evolution import (
     run_evolution_maintenance,
 )
 from deepmate.trace import JsonlTraceSink, TraceEvent, TraceRecorder
+from deepmate.storage.session_store import SessionStore
 
 
 class EvolutionMaintenanceTests(unittest.TestCase):
@@ -285,6 +287,205 @@ class EvolutionMaintenanceTests(unittest.TestCase):
                     for change in changes
                 )
             )
+
+    def test_profile_scoped_corrections_write_profile_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_dir = workspace / "var"
+            profile = ProfileRef(name="default", uri="profiles/default")
+            records = (
+                {
+                    "kind": "user_correction",
+                    "summary": "Always be concise.",
+                    "refs": (
+                        "signature=always be concise",
+                        "target_scope=profile",
+                        "source_group=session:1",
+                    ),
+                },
+                {
+                    "kind": "user_correction",
+                    "summary": "Always be concise.",
+                    "refs": (
+                        "signature=always be concise",
+                        "target_scope=profile",
+                        "source_group=session:2",
+                    ),
+                },
+            )
+
+            result = run_evolution_maintenance(
+                workspace=workspace,
+                data_dir=data_dir,
+                profile=profile,
+                evidence_records=records,
+                force=True,
+            )
+
+            profile_behavior = workspace / "profiles" / "default" / "behavior.md"
+            self.assertEqual(result.behavior_changes, 1)
+            self.assertIn("Always be concise.", profile_behavior.read_text(encoding="utf-8"))
+            self.assertFalse((workspace / ".deepmate" / "behavior.md").exists())
+
+    def test_session_transcripts_contribute_distinct_corrections_and_workflows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_dir = workspace / "var"
+            sessions_dir = data_dir / "sessions"
+            profile = ProfileRef(name="default", uri="profiles/default")
+            store = SessionStore.in_directory(sessions_dir)
+            for index in range(2):
+                session = store.create(workspace, profile, title="Review Flow")
+                records = (
+                    {
+                        "session_id": session.session_id,
+                        "record_id": f"message-{index}",
+                        "recorded_at": "2026-07-18T01:00:00+00:00",
+                        "sequence": 1,
+                        "kind": "message",
+                        "payload": {
+                            "role": "user",
+                            "content": "Correction: Do not overwrite generated files.",
+                        },
+                    },
+                    {
+                        "session_id": session.session_id,
+                        "record_id": f"tools-{index}",
+                        "recorded_at": "2026-07-18T01:01:00+00:00",
+                        "sequence": 2,
+                        "kind": "tool_exchange",
+                        "payload": {
+                            "tool_results": [
+                                {"name": "read_text_file", "is_error": False},
+                                {"name": "write_text_file", "is_error": False},
+                            ]
+                        },
+                    },
+                )
+                session.transcript_path.write_text(
+                    "\n".join(json.dumps(record) for record in records) + "\n",
+                    encoding="utf-8",
+                )
+
+            result = run_evolution_maintenance(
+                workspace=workspace,
+                data_dir=data_dir,
+                profile=profile,
+                sessions_dir=sessions_dir,
+                now=datetime(2026, 7, 19, tzinfo=UTC),
+            )
+
+            self.assertEqual(result.sessions_seen, 2)
+            self.assertEqual(result.behavior_changes, 1)
+            self.assertEqual(result.generated_skill_changes, 1)
+            generated_skills = tuple(
+                (workspace / "skills" / "generated").glob("*/SKILL.md")
+            )
+            self.assertEqual(len(generated_skills), 1)
+            generated_content = generated_skills[0].read_text(encoding="utf-8")
+            self.assertNotIn("Review Flow", generated_content)
+
+    def test_activity_notes_contribute_distinct_explicit_corrections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_dir = workspace / "var"
+            activity_root = data_dir / "activity" / "default"
+            activity_store = ActivityStore(activity_root)
+            for index in range(2):
+                activity_store.append_daily_entry(
+                    ActivityEntry(
+                        timestamp=f"2026-07-19T0{index + 1}:00:00+08:00",
+                        event="session_end",
+                        status="completed",
+                        title="Preference correction",
+                        summary="Correction: Respond in Chinese.",
+                        session_id=f"session-{index}",
+                        session_title="Preference correction",
+                        profile="default",
+                        workspace=str(workspace),
+                    )
+                )
+
+            result = run_evolution_maintenance(
+                workspace=workspace,
+                data_dir=data_dir,
+                profile=ProfileRef(name="default", uri="profiles/default"),
+                activity_dir=activity_root,
+            )
+
+            profile_behavior = workspace / "profiles" / "default" / "behavior.md"
+            self.assertEqual(result.activity_notes_seen, 1)
+            self.assertEqual(result.behavior_changes, 1)
+            self.assertIn("Respond in Chinese.", profile_behavior.read_text(encoding="utf-8"))
+
+    def test_maintenance_does_not_persist_sensitive_behavior_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_dir = workspace / "var"
+            profile = ProfileRef(name="default", uri="profiles/default")
+            trace_path = data_dir / "trace.jsonl"
+            correction = "Use api_key=sk-secretvalue123 for future requests."
+            _write_trace(
+                trace_path,
+                (
+                    _trace_record(
+                        "user_correction",
+                        correction,
+                        "2026-06-06T01:03:00+00:00",
+                        ("signature=sensitive",),
+                    ),
+                    _trace_record(
+                        "user_correction",
+                        correction,
+                        "2026-06-06T01:04:00+00:00",
+                        ("signature=sensitive",),
+                    ),
+                ),
+            )
+
+            result = run_evolution_maintenance(
+                workspace=workspace,
+                data_dir=data_dir,
+                profile=profile,
+                now=datetime(2026, 6, 6, 2, 0, tzinfo=UTC),
+                trace_path=trace_path,
+            )
+
+            self.assertTrue(result.ran)
+            self.assertEqual(result.behavior_changes, 0)
+            self.assertFalse((workspace / ".deepmate" / "behavior.md").exists())
+
+    def test_maintenance_filters_identity_and_network_behavior_hints(self) -> None:
+        sensitive_corrections = (
+            "Use account_id=customer-12345 for future requests.",
+            "Always connect to 10.20.30.40 for this service.",
+            "Call +86 138 0013 8000 before deployment.",
+        )
+        for index, correction in enumerate(sensitive_corrections):
+            with self.subTest(correction=correction), tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp)
+                records = tuple(
+                    {
+                        "kind": "user_correction",
+                        "summary": correction,
+                        "refs": (
+                            f"signature=sensitive-{index}",
+                            f"source_group=session:{source_index}",
+                        ),
+                    }
+                    for source_index in range(2)
+                )
+
+                result = run_evolution_maintenance(
+                    workspace=workspace,
+                    data_dir=workspace / "var",
+                    profile=ProfileRef(name="default", uri="profiles/default"),
+                    evidence_records=records,
+                    force=True,
+                )
+
+                self.assertEqual(result.behavior_changes, 0)
+                self.assertFalse((workspace / ".deepmate" / "behavior.md").exists())
 
     def test_maintenance_archives_cold_generated_skill_from_capability_signal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

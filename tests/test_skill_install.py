@@ -184,7 +184,7 @@ class SkillInstallTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"GITHUB_TOKEN": "gh_test"}),
-            patch("urllib.request.urlopen", fake_urlopen),
+            patch("deepmate.skills.install._open_public_request", fake_urlopen),
             patch("deepmate.skills.install._validate_public_url"),
         ):
             self.assertEqual(_fetch_text("https://api.github.com/repos/a/b"), "{}")
@@ -203,7 +203,10 @@ class SkillInstallTests(unittest.TestCase):
                 return b"x" * (size + 1)
 
         with (
-            patch("urllib.request.urlopen", return_value=Response()),
+            patch(
+                "deepmate.skills.install._open_public_request",
+                return_value=Response(),
+            ),
             patch("deepmate.skills.install._validate_public_url"),
         ):
             with self.assertRaisesRegex(OSError, "remote skill response exceeds"):
@@ -222,7 +225,10 @@ class SkillInstallTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                patch("urllib.request.urlopen", return_value=Response()),
+                patch(
+                    "deepmate.skills.install._open_public_request",
+                    return_value=Response(),
+                ),
                 patch("deepmate.skills.install._validate_public_url"),
             ):
                 with self.assertRaisesRegex(OSError, "remote skill response exceeds"):

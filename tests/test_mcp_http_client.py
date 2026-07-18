@@ -61,6 +61,22 @@ class McpHttpClientTests(unittest.TestCase):
             ["initialize", "notifications/initialized", "tools/list"],
         )
 
+    def test_streamable_http_client_rejects_repeated_pagination_cursor(self) -> None:
+        transport = _LoopingHttpTransport()
+        with patch("urllib.request.urlopen", transport.urlopen):
+            with tempfile.TemporaryDirectory() as tmp:
+                spec = McpServerSpec(
+                    name="remote",
+                    transport=McpTransport.STREAMABLE_HTTP,
+                    url="https://mcp.example.test/mcp",
+                )
+                with create_mcp_client(spec, Path(tmp)) as client:
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "repeated pagination cursor",
+                    ):
+                        client.list_tools()
+
     def test_streamable_http_client_rejects_oversized_response(self) -> None:
         transport = _FakeHttpTransport(oversized_methods={"initialize"})
         with patch("urllib.request.urlopen", transport.urlopen):
@@ -251,6 +267,16 @@ class _FakeHttpTransport:
             "id": request_id,
             "error": {"code": -32601, "message": f"unknown method: {method}"},
         }
+
+
+class _LoopingHttpTransport(_FakeHttpTransport):
+    def response_for(self, payload: dict[str, object]) -> dict[str, object]:
+        response = super().response_for(payload)
+        if payload.get("method") == "tools/list":
+            result = response.get("result")
+            if isinstance(result, dict):
+                result["nextCursor"] = "same-page"
+        return response
 
 
 class _FakeHttpResponse:
