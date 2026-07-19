@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "id": "dm-evo-failure-guard-001",
+  "version": 1,
+  "suite": "evolution",
+  "kind": "regression",
+  "title": "Repeated failure evidence produces a bounded failure guard",
+  "okr": {
+    "objective": "O3",
+    "key_results": [
+      "KR3.1"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic",
+    "checks": [
+      "evolution_evidence"
+    ],
+    "evolution_records": [
+      {
+        "kind": "tool_failure",
+        "tool_name": "synthetic_tool",
+        "error_signature": "bounded-timeout",
+        "confidence": "0.9",
+        "source_group": "synthetic-1",
+        "source_ref": "synthetic-failure-1"
+      },
+      {
+        "kind": "tool_failure",
+        "tool_name": "synthetic_tool",
+        "error_signature": "bounded-timeout",
+        "confidence": "0.9",
+        "source_group": "synthetic-2",
+        "source_ref": "synthetic-failure-2"
+      },
+      {
+        "kind": "tool_failure",
+        "tool_name": "synthetic_tool",
+        "error_signature": "bounded-timeout",
+        "confidence": "0.9",
+        "source_group": "synthetic-3",
+        "source_ref": "synthetic-failure-3"
+      }
+    ]
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "Created one bounded failure guard from three independent sources."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Evaluate the isolated self-evolution behavior using only synthetic evidence."
+    }
+  ],
+  "budgets": {
+    "max_steps": 2,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "observations.evolution_failure_candidates",
+      "path": "observations.evolution_failure_candidates",
+      "equals": 1
+    },
+    {
+      "type": "content",
+      "name": "guard-outcome",
+      "contains": [
+        "bounded failure guard"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "guard_precision",
+    "guard_recall"
+  ],
+  "presets": [
+    "pr",
+    "core",
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "evolution",
+    "horizon:L1"
+  ]
+}

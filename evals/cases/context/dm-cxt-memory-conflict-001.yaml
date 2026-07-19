@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "id": "dm-cxt-memory-conflict-001",
+  "version": 1,
+  "suite": "context",
+  "kind": "regression",
+  "title": "New explicit preference supersedes an older conflicting preference",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.1"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic"
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "Applied preference-new and did not use preference-old."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "The newest explicit preference is preference-new; resolve the older conflict."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "content",
+      "name": "required-outcome",
+      "contains": [
+        "preference-new"
+      ]
+    },
+    {
+      "type": "content",
+      "name": "old-preference-not-applied",
+      "not_contains": [
+        "using preference-old"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "context_fidelity",
+    "memory_conflict_resolution"
+  ],
+  "presets": [
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "context",
+    "horizon:L1"
+  ]
+}

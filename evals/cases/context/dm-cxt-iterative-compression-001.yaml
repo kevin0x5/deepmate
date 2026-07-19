@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "id": "dm-cxt-iterative-compression-001",
+  "version": 1,
+  "suite": "context",
+  "kind": "regression",
+  "title": "Repeated compression retains early decisions across summaries",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.1"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic"
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "early-choice-green; artifact-version-2; rejected-option-red; continue-check-4"
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Recover the early decision and the current continuation after repeated summaries."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "probe",
+      "name": "iterative-compression-fidelity",
+      "probe": "compression-iterative.json",
+      "threshold": 1
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "context_fidelity",
+    "compression_continuity"
+  ],
+  "presets": [
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "context",
+    "compression",
+    "horizon:L2"
+  ]
+}

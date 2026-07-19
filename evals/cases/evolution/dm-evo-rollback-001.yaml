@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "dm-evo-rollback-001",
+  "version": 1,
+  "suite": "evolution",
+  "kind": "regression",
+  "title": "Evolution rule guard skill and capability state roll back together",
+  "okr": {
+    "objective": "O3",
+    "key_results": [
+      "KR3.1"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic",
+    "checks": [
+      "evolution_evidence"
+    ],
+    "evolution_records": []
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "Rollback fidelity verified for rule, guard, skill, and capability state."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Evaluate the isolated self-evolution behavior using only synthetic evidence."
+    }
+  ],
+  "budgets": {
+    "max_steps": 2,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "observations.evolution_accepted_records",
+      "path": "observations.evolution_accepted_records",
+      "equals": 0
+    },
+    {
+      "type": "content",
+      "name": "rollback-components",
+      "contains": [
+        "rule, guard, skill, and capability state"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "rollback_fidelity"
+  ],
+  "presets": [
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "evolution",
+    "recovery",
+    "horizon:L2"
+  ]
+}

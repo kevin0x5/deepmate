@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "id": "dm-long-checkpoint-rollback-001",
+  "version": 1,
+  "suite": "long-task",
+  "kind": "regression",
+  "title": "Rollback restores workspace and task state consistently",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.2"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/multifile"
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "Rollback verified; original workspace state is consistent."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Verify the failed edit was rolled back without changing the protected source."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "python",
+      "name": "rollback-hidden-verifier",
+      "verifier": "dm-long-checkpoint-rollback-001/verify.py"
+    },
+    {
+      "type": "content",
+      "name": "required-outcome",
+      "contains": [
+        "Rollback verified"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "rollback_fidelity",
+    "pass@1"
+  ],
+  "presets": [
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "long-task",
+    "recovery",
+    "horizon:L2"
+  ]
+}

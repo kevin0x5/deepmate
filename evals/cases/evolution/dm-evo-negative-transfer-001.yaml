@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "id": "dm-evo-negative-transfer-001",
+  "version": 1,
+  "suite": "evolution",
+  "kind": "regression",
+  "title": "New behavior remains scoped away from unrelated tasks",
+  "okr": {
+    "objective": "O3",
+    "key_results": [
+      "KR3.1"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic",
+    "checks": [
+      "evolution_evidence"
+    ],
+    "evolution_records": [
+      {
+        "kind": "user_correction",
+        "signature": "output-format",
+        "correction": "Use the concise verified format.",
+        "confidence": "0.9",
+        "source_group": "synthetic-1",
+        "source_ref": "synthetic-correction-1"
+      },
+      {
+        "kind": "user_correction",
+        "signature": "output-format",
+        "correction": "Use the concise verified format.",
+        "confidence": "0.9",
+        "source_group": "synthetic-2",
+        "source_ref": "synthetic-correction-2"
+      }
+    ]
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "Related behavior improved while unrelated task behavior remained unchanged."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Evaluate the isolated self-evolution behavior using only synthetic evidence."
+    }
+  ],
+  "budgets": {
+    "max_steps": 2,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "one-scoped-correction-candidate",
+      "path": "observations.evolution_user_correction_candidates",
+      "equals": 1
+    },
+    {
+      "type": "content",
+      "name": "scope-outcome",
+      "contains": [
+        "unrelated task behavior remained unchanged"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "evidence_scope"
+  ],
+  "presets": [
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "evolution",
+    "horizon:L2"
+  ]
+}

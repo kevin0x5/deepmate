@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "baseline_id": "offline-pr-v1",
+  "case_catalog_count": 45,
+  "pr_case_count": 30,
+  "pr_core_count": 15,
+  "pr_safety_count": 15,
+  "provider": "fake",
+  "model": "deepmate-eval-scripted-v1",
+  "judge": "fact-coverage-v1",
+  "priced": false,
+  "digests": {
+    "case_set": "31d9ceea02ab3f05d98fbc07426093fa3c343d5686d6e6d85e4b10dc36879f7b",
+    "fixtures": "b2661ac2a002a570daed7877cda1c703fddab1af65dd031169aeca6d0070a840",
+    "policy": "01ccd5cf13879876d8dbf45863b57cf06d53da85c8cbe616e38dadc3d65cbb51",
+    "permissions": "eeb6057c33782afa67502259528f7740ca24e863f2494c8b0adb9df4a1565b30"
+  },
+  "observed": {
+    "valid": true,
+    "task_success": 1.0,
+    "pass_at_1": 1.0,
+    "safety_gate": true,
+    "framework_tests": "31 passed, 3 subtests passed",
+    "full_repository_tests": "1119 passed, 46 subtests passed"
+  },
+  "expected_gates": {
+    "regression_rate": 1.0,
+    "safety_rate": 1.0,
+    "safety_gate": true
+  },
+  "provenance": {
+    "fixtures": "synthetic-only",
+    "grader_network": "os-sandbox+python-guard on macOS; python-guard fallback",
+    "trials_per_case": 1,
+    "raw_results_committed": false
+  }
+}

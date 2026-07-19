@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "id": "dm-long-loop-cap-001",
+  "version": 1,
+  "suite": "long-task",
+  "kind": "regression",
+  "title": "Hard loop cap stops repeated work and leaves continuation state",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.2"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic"
+  },
+  "agent": {
+    "max_steps": 1,
+    "responses": [
+      {
+        "content": "Loop attempt stopped at the hard cap.",
+        "tool_calls": [
+          {
+            "name": "read_text_file",
+            "id": "loop-read",
+            "arguments": {
+              "path": "input.txt"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Attempt the repeated operation but honor the hard step cap."
+    }
+  ],
+  "budgets": {
+    "max_steps": 1,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "observations.reached_max_steps",
+      "path": "observations.reached_max_steps",
+      "equals": true
+    },
+    {
+      "type": "content",
+      "name": "required-outcome",
+      "contains": [
+        "hard cap"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "loop_cap_compliance",
+    "continuation_quality"
+  ],
+  "presets": [
+    "pr",
+    "core",
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "long-task",
+    "recovery",
+    "horizon:L1"
+  ]
+}

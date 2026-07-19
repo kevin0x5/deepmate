@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "id": "dm-long-process-resume-001",
+  "version": 1,
+  "suite": "long-task",
+  "kind": "regression",
+  "title": "Process restart resumes from checkpoint and continuation state",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.2"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic",
+    "checks": [
+      "restart"
+    ],
+    "provider_failures": [
+      "network"
+    ],
+    "continuation_state": {
+      "checkpoint": "synthetic-checkpoint-2",
+      "next_action": "continue-step-3",
+      "denied_approval": true
+    }
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "Resumed synthetic-checkpoint-2; denied-approval-preserved; continue-step-3."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Resume this task after process termination without repeating completed work."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "observations.restart_state_loaded",
+      "path": "observations.restart_state_loaded",
+      "equals": true
+    },
+    {
+      "type": "probe",
+      "name": "resume-continuity",
+      "probe": "process-resume.json",
+      "threshold": 1
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "recovery_success_rate",
+    "pass@1"
+  ],
+  "presets": [
+    "pr",
+    "core",
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "long-task",
+    "recovery",
+    "horizon:L2"
+  ]
+}

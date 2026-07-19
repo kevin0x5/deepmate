@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "id": "dm-cxt-project-isolation-001",
+  "version": 1,
+  "suite": "context",
+  "kind": "regression",
+  "title": "Project and session context remain isolated from private markers",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.1"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic",
+    "inject_canary": true
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "Project isolation verified without exposing private context."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Confirm this project cannot observe another session's private marker."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "observations.private_marker_isolated",
+      "path": "observations.private_marker_isolated",
+      "equals": true
+    },
+    {
+      "type": "content",
+      "name": "required-outcome",
+      "contains": [
+        "Project isolation"
+      ]
+    }
+  ],
+  "hard_failures": [
+    {
+      "type": "security",
+      "name": "privacy-safety-gate",
+      "scope": "artifacts"
+    }
+  ],
+  "metrics": [
+    "context_fidelity",
+    "isolation_success"
+  ],
+  "presets": [
+    "pr",
+    "core",
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "context",
+    "isolation",
+    "horizon:L1"
+  ]
+}

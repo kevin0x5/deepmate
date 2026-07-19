@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "id": "dm-local-download-resume-001",
+  "version": 1,
+  "suite": "local-model",
+  "kind": "regression",
+  "title": "Interrupted local model download resumes and completes safely",
+  "okr": {
+    "objective": "O3",
+    "key_results": [
+      "KR3.2"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic",
+    "ollama_fixture": "resume.json"
+  },
+  "agent": {
+    "max_steps": 4,
+    "responses": [
+      {
+        "content": "First download stream interrupted.",
+        "tool_calls": [
+          {
+            "name": "eval_local_prepare",
+            "id": "local-prepare-1",
+            "arguments": {
+              "model": "synthetic-local-model"
+            }
+          }
+        ]
+      },
+      {
+        "content": "Resuming the same model download.",
+        "tool_calls": [
+          {
+            "name": "eval_local_prepare",
+            "id": "local-prepare-2",
+            "arguments": {
+              "model": "synthetic-local-model"
+            }
+          }
+        ]
+      },
+      {
+        "content": "Local model resume completed and deployment is ready."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "workspace_write"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Prepare the local model, resume after the injected disconnect, and report readiness."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "two-download-attempts",
+      "path": "observations.local_downloads",
+      "gte": 2
+    },
+    {
+      "type": "content",
+      "name": "resume-ready",
+      "contains": [
+        "resume completed",
+        "ready"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "deployment_success",
+    "resume_success",
+    "latency_seconds"
+  ],
+  "presets": [
+    "pr",
+    "core",
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "local-model",
+    "recovery",
+    "horizon:L1"
+  ]
+}

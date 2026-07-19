@@ -40,6 +40,23 @@ cd deepmate
 python3 -m pip install -e .
 ```
 
+## Agent Evaluations
+
+Deepmate provides a repository-level Agent evaluation suite under
+[`evals/`](evals/OBJECTIVES.md), covering context management, long-running tasks,
+tool governance, evolution, local models, and safety. It detects behavioral
+regressions and verifies that the Deepmate Agent can complete tasks, use tools,
+and recover from interruptions within defined constraints.
+
+```bash
+python3 -m evals validate
+python3 -m evals run --preset pr
+python3 -m evals report <run-id>
+```
+
+See [`evals/OBJECTIVES.md`](evals/OBJECTIVES.md) for the complete evaluation scope,
+metrics, and usage.
+
 ## Features
 
 Deepmate is in active development. Core CLI/TUI workflows are local-first; optional integrations such as Ollama, Computer Use, Enterprise WeChat, preview relays, and the desktop pet need their own setup.

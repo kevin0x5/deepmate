@@ -12,6 +12,7 @@
 
 # Deepmate 本地运行数据和用户私有 profile
 .deepmate/
+var/evals/
 var/
 
 # 本地环境和密钥

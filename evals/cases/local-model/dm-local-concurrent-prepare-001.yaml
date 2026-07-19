@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "id": "dm-local-concurrent-prepare-001",
+  "version": 1,
+  "suite": "local-model",
+  "kind": "regression",
+  "title": "Concurrent preparation performs one physical model download",
+  "okr": {
+    "objective": "O3",
+    "key_results": [
+      "KR3.2"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic",
+    "ollama_fixture": "healthy.json",
+    "checks": [
+      "local_concurrency"
+    ]
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "All concurrent callers observed one prepared local model."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Verify concurrent preparation coalesces the physical download."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "observations.concurrent_prepare_ready",
+      "path": "observations.concurrent_prepare_ready",
+      "equals": true
+    },
+    {
+      "type": "state",
+      "name": "observations.concurrent_download_count",
+      "path": "observations.concurrent_download_count",
+      "equals": 1
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "deployment_success",
+    "download_deduplication"
+  ],
+  "presets": [
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "local-model",
+    "horizon:L1"
+  ]
+}

@@ -1,0 +1,1 @@
+Synthetic task input: preserve the decision label `decision-blue` and continue at step 3.

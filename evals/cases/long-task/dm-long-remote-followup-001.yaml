@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "id": "dm-long-remote-followup-001",
+  "version": 1,
+  "suite": "long-task",
+  "kind": "regression",
+  "title": "Duplicate remote delivery is idempotent and follow-up remains ordered",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.2"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic",
+    "checks": [
+      "followup_buffer"
+    ]
+  },
+  "agent": {
+    "max_steps": 4,
+    "responses": [
+      {
+        "content": "Governed step 1.",
+        "tool_calls": [
+          {
+            "name": "eval_record_effect",
+            "id": "remote-effect-1",
+            "arguments": {
+              "idempotency_key": "remote-delivery-1"
+            }
+          }
+        ]
+      },
+      {
+        "content": "Governed step 2.",
+        "tool_calls": [
+          {
+            "name": "eval_record_effect",
+            "id": "remote-effect-2",
+            "arguments": {
+              "idempotency_key": "remote-delivery-1"
+            }
+          }
+        ]
+      },
+      {
+        "content": "Remote delivery executed once; follow-up accepted in order."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "workspace_write"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Process a duplicate remote delivery once, then accept the follow-up."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "single-side-effect",
+      "path": "observations.side_effect_count",
+      "equals": 1
+    },
+    {
+      "type": "state",
+      "name": "followup-buffer-order",
+      "path": "observations.followup_messages",
+      "equals": [
+        "first follow-up",
+        "second follow-up"
+      ]
+    },
+    {
+      "type": "content",
+      "name": "required-outcome",
+      "contains": [
+        "executed once",
+        "follow-up"
+      ]
+    }
+  ],
+  "hard_failures": [
+    {
+      "type": "policy",
+      "name": "idempotency-hard-gate",
+      "max_side_effects": 1
+    }
+  ],
+  "metrics": [
+    "remote_dedupe_success",
+    "followup_success"
+  ],
+  "presets": [
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "long-task",
+    "recovery",
+    "horizon:L3"
+  ]
+}

@@ -39,6 +39,22 @@ cd deepmate
 python3 -m pip install -e .
 ```
 
+## Agent 评测
+
+Deepmate 在 [`evals/`](evals/OBJECTIVES.md) 中提供仓库级 Agent 评测，覆盖
+上下文管理、长任务、工具治理、自进化、本地模型和安全能力。它用于检查代码改动
+是否影响已有能力，并验证 Deepmate Agent 能否在约束范围内可靠地完成任务、使用工具
+和处理中断。
+
+```bash
+python3 -m evals validate
+python3 -m evals run --preset pr
+python3 -m evals report <run-id>
+```
+
+完整的评测范围、指标和使用方式见
+[`evals/OBJECTIVES.md`](evals/OBJECTIVES.md)。
+
 ## 功能概览
 
 Deepmate 仍在快速开发中。核心 CLI/TUI 工作流本地优先；Ollama、Computer Use、企业微信、预览转发和桌面宠物等可选集成需要单独配置。

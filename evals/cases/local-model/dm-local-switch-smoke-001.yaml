@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "id": "dm-local-switch-smoke-001",
+  "version": 1,
+  "suite": "local-model",
+  "kind": "regression",
+  "title": "Model switching preserves session context tools and permissions",
+  "okr": {
+    "objective": "O3",
+    "key_results": [
+      "KR3.2"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic",
+    "ollama_fixture": "healthy.json"
+  },
+  "agent": {
+    "max_steps": 3,
+    "responses": [
+      {
+        "content": "Switching through the governed local lifecycle.",
+        "tool_calls": [
+          {
+            "name": "eval_local_prepare",
+            "id": "local-switch",
+            "arguments": {
+              "model": "synthetic-local-model"
+            }
+          }
+        ]
+      },
+      {
+        "content": "Verify inference through the switched local model.",
+        "tool_calls": [
+          {
+            "name": "eval_local_infer",
+            "id": "local-infer-smoke",
+            "arguments": {
+              "model": "synthetic-local-model",
+              "prompt": "Verify context and tool continuity."
+            }
+          }
+        ]
+      },
+      {
+        "content": "Model switched; session, context, tools, and permissions remained consistent."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "workspace_write"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Switch to the prepared local model without changing session governance."
+    }
+  ],
+  "budgets": {
+    "max_steps": 3,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "one-local-download",
+      "path": "observations.local_downloads",
+      "equals": 1
+    },
+    {
+      "type": "content",
+      "name": "switch-invariants",
+      "contains": [
+        "session, context, tools, and permissions"
+      ]
+    },
+    {
+      "type": "state",
+      "name": "local-switch-tool-sequence",
+      "path": "observations.tool_calls",
+      "equals": [
+        "eval_local_prepare",
+        "eval_local_infer"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "pass@1",
+    "deployment_success",
+    "token_per_second",
+    "p95_latency"
+  ],
+  "presets": [
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "local-model",
+    "horizon:L2"
+  ]
+}

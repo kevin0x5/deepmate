@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "dm-long-goal-change-001",
+  "version": 1,
+  "suite": "long-task",
+  "kind": "regression",
+  "title": "Mid-task user constraint updates the acceptance contract",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.2"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic"
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "Acceptance contract-v2 includes the added compatibility constraint."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "The original task now also requires compatibility; update the acceptance contract before claiming success."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "content",
+      "name": "required-outcome",
+      "contains": [
+        "contract-v2",
+        "compatibility"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "pass@1",
+    "goal_change_success"
+  ],
+  "presets": [
+    "pr",
+    "core",
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "long-task",
+    "horizon:L2"
+  ]
+}

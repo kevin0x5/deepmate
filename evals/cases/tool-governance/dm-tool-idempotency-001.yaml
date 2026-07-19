@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "id": "dm-tool-idempotency-001",
+  "version": 1,
+  "suite": "tool-governance",
+  "kind": "regression",
+  "title": "Lost responses and retries do not duplicate non-idempotent effects",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.3"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic"
+  },
+  "agent": {
+    "max_steps": 4,
+    "responses": [
+      {
+        "content": "Governed tool step 1.",
+        "tool_calls": [
+          {
+            "name": "eval_record_effect",
+            "id": "idem-1",
+            "arguments": {
+              "idempotency_key": "stable-effect-1"
+            }
+          }
+        ]
+      },
+      {
+        "content": "Governed tool step 2.",
+        "tool_calls": [
+          {
+            "name": "eval_record_effect",
+            "id": "idem-2",
+            "arguments": {
+              "idempotency_key": "stable-effect-1"
+            }
+          }
+        ]
+      },
+      {
+        "content": "Retry reused the idempotency key; exactly one effect remains."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "workspace_write"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Retry the synthetic side effect after a lost response without duplicating it."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "observations.side_effect_count",
+      "path": "observations.side_effect_count",
+      "equals": 1
+    },
+    {
+      "type": "policy",
+      "name": "one-effect",
+      "max_side_effects": 1
+    },
+    {
+      "type": "content",
+      "name": "required-outcome",
+      "contains": [
+        "exactly one effect"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "idempotency_success",
+    "tool_recovery_rate"
+  ],
+  "presets": [
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "tool-governance",
+    "recovery",
+    "horizon:L2"
+  ]
+}

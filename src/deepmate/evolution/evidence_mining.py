@@ -129,6 +129,8 @@ def collect_evidence_from_records(
     user_corrections: list[UserCorrectionEvidence] = []
     workflows: list[WorkflowEvidence] = []
     for index, record in enumerate(records):
+        if _is_evaluation_artifact(record):
+            continue
         kind = normalize_name(_record_text(record, "kind")).replace(" ", "_")
         refs = _record_refs(record)
         source_ref = _source_ref(record, refs, index)
@@ -195,6 +197,23 @@ def collect_evidence_from_records(
         user_corrections=tuple(user_corrections),
         workflows=tuple(workflows),
     )
+
+
+def _is_evaluation_artifact(record: Mapping[str, object]) -> bool:
+    """Keep eval traces, hidden facts, and grader output out of evolution evidence."""
+    if record.get("eval_artifact") is True or record.get("evaluation") is True:
+        return True
+    source_kind = _record_text(record, "source_kind").strip().lower()
+    if source_kind in {"eval", "evaluation", "grader", "hidden_probe"}:
+        return True
+    source = " ".join(
+        (
+            _record_text(record, "source_ref"),
+            _record_text(record, "path"),
+            " ".join(_record_refs(record)),
+        )
+    ).replace("\\", "/").lower()
+    return "/var/evals/" in f"/{source.strip('/')}" or source.startswith("var/evals/")
 
 
 def user_correction_candidates(

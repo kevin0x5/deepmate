@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "id": "dm-cxt-output-retrieval-001",
+  "version": 1,
+  "suite": "context",
+  "kind": "regression",
+  "title": "Compacted tool output remains retrievable through its handle",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.1"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic"
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "Generate the bounded large output.",
+        "tool_calls": [
+          {
+            "name": "eval_large_output",
+            "id": "large-output",
+            "arguments": {}
+          }
+        ]
+      },
+      {
+        "content": "Retrieve the compacted output by its runtime handle.",
+        "tool_calls": [
+          {
+            "name": "retrieve_tool_output",
+            "id": "retrieve-output",
+            "arguments": {
+              "ref": "$last_tool_output_ref"
+            }
+          }
+        ]
+      },
+      {
+        "content": "Retrieval completed and verified retrieved-tail-marker."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Retrieve the compacted output handle and state its tail marker."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "probe",
+      "name": "output-retrieval-fidelity",
+      "probe": "output-retrieval.json",
+      "threshold": 1
+    },
+    {
+      "type": "trace",
+      "name": "compaction-observed",
+      "contains": [
+        "tool_output_compacted"
+      ],
+      "min_events": 1
+    },
+    {
+      "type": "state",
+      "name": "retrieval-tool-sequence",
+      "path": "observations.tool_calls",
+      "equals": [
+        "eval_large_output",
+        "retrieve_tool_output"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "context_fidelity",
+    "retrieval_success"
+  ],
+  "presets": [
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "context",
+    "compression",
+    "horizon:L1"
+  ]
+}

@@ -1,0 +1,4 @@
+{
+  "category": ["recall", "artifact", "decision", "continuation"],
+  "expected_facts": ["early-choice-green", "artifact-version-2", "rejected-option-red", "continue-check-4"]
+}

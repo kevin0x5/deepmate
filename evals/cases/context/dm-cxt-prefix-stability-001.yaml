@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "id": "dm-cxt-prefix-stability-001",
+  "version": 1,
+  "suite": "context",
+  "kind": "regression",
+  "title": "Dynamic turns preserve the stable system and tool prefix",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.1"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic",
+    "schema_mode": "progressive"
+  },
+  "agent": {
+    "max_steps": 3,
+    "responses": [
+      {
+        "content": "Using the governed runtime tool.",
+        "tool_calls": [
+          {
+            "name": "read_text_file",
+            "id": "prefix-read",
+            "arguments": {
+              "path": "input.txt"
+            }
+          }
+        ]
+      },
+      {
+        "content": "Stable prefix confirmed after the dynamic tool exchange."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Read the input and report whether the stable prefix changed."
+    }
+  ],
+  "budgets": {
+    "max_steps": 3,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "observations.prefix_stable",
+      "path": "observations.prefix_stable",
+      "equals": true
+    },
+    {
+      "type": "state",
+      "name": "tool-call-sequence",
+      "path": "observations.tool_calls",
+      "equals": [
+        "read_text_file"
+      ]
+    },
+    {
+      "type": "content",
+      "name": "required-outcome",
+      "contains": [
+        "Stable prefix"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "prefix_stability",
+    "cache_hit_ratio"
+  ],
+  "presets": [
+    "pr",
+    "core",
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "context",
+    "horizon:L0"
+  ]
+}

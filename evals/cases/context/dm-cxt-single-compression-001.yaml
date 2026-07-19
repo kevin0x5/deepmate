@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "id": "dm-cxt-single-compression-001",
+  "version": 1,
+  "suite": "context",
+  "kind": "regression",
+  "title": "Single compression preserves recall artifact decision and continuation",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.1"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic"
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "recall-orbit; artifact-plan; decision-blue; continue-step-3"
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Summarize the supplied long-session facts without losing the continuation point."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "probe",
+      "name": "single-compression-fidelity",
+      "probe": "compression-single.json",
+      "threshold": 1
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "context_fidelity",
+    "compression_continuity"
+  ],
+  "presets": [
+    "pr",
+    "core",
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "context",
+    "compression",
+    "horizon:L1"
+  ]
+}

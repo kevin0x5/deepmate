@@ -1,0 +1,10 @@
+{
+  "faults": [
+    "disk_full",
+    "disconnect",
+    "cancelled",
+    "corrupt_manifest",
+    "slow_response",
+    "inference_failure"
+  ]
+}

@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "id": "dm-cxt-freeze-refresh-001",
+  "version": 1,
+  "suite": "context",
+  "kind": "regression",
+  "title": "Frozen context changes only after an explicit refresh",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.1"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic",
+    "checks": [
+      "context_refresh"
+    ],
+    "variants": {
+      "control": {
+        "environment": {
+          "checks": [
+            "snapshot_stability"
+          ]
+        }
+      },
+      "candidate": {
+        "environment": {
+          "checks": [
+            "context_refresh"
+          ]
+        }
+      }
+    }
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "Frozen rules remained alpha; explicit refresh loaded beta."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Verify the frozen profile remains stable until refresh."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "observations.context_generation_changed",
+      "path": "observations.context_generation_changed",
+      "equals": true
+    },
+    {
+      "type": "state",
+      "name": "observations.frozen_retained_old_rule",
+      "path": "observations.frozen_retained_old_rule",
+      "equals": true
+    },
+    {
+      "type": "state",
+      "name": "observations.refresh_loaded_new_rule",
+      "path": "observations.refresh_loaded_new_rule",
+      "equals": true
+    },
+    {
+      "type": "content",
+      "name": "required-outcome",
+      "contains": [
+        "Frozen rules",
+        "refresh"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "context_fidelity",
+    "snapshot_generation"
+  ],
+  "presets": [
+    "pr",
+    "core",
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "context",
+    "horizon:L0"
+  ]
+}

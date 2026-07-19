@@ -1,0 +1,12 @@
+{
+  "responses": {
+    "lookup": {
+      "content": "Synthetic lookup result: artifact-plan",
+      "side_effect": false
+    },
+    "create": {
+      "content": "Synthetic record accepted",
+      "side_effect": true
+    }
+  }
+}

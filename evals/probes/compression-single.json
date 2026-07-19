@@ -1,0 +1,4 @@
+{
+  "category": ["recall", "artifact", "decision", "continuation"],
+  "expected_facts": ["recall-orbit", "artifact-plan", "decision-blue", "continue-step-3"]
+}

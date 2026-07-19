@@ -1,0 +1,4 @@
+{
+  "category": ["artifact", "continuation"],
+  "expected_facts": ["Retrieval completed", "retrieved-tail-marker"]
+}

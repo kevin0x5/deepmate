@@ -695,7 +695,7 @@ def _read_jsonl_records_since(
     if path is None:
         return ()
     trace_path = Path(path)
-    if not trace_path.exists():
+    if _is_evaluation_path(trace_path) or not trace_path.exists():
         return ()
     records: list[Mapping[str, object]] = []
     for line in trace_path.read_text(encoding="utf-8").splitlines():
@@ -722,6 +722,8 @@ def _read_session_records_since(
 ) -> tuple[SessionRecord, ...]:
     if sessions_dir is None:
         return ()
+    if _is_evaluation_path(Path(sessions_dir)):
+        return ()
     store = SessionStore.in_directory(sessions_dir)
     sessions: list[SessionRecord] = []
     for session in store.list_recent(limit=10_000):
@@ -742,7 +744,7 @@ def _activity_paths_since(
     if activity_dir is None:
         return ()
     root = Path(activity_dir)
-    if not root.exists():
+    if _is_evaluation_path(root) or not root.exists():
         return ()
     paths: list[Path] = []
     for path in sorted(root.rglob("*.md")):
@@ -750,6 +752,12 @@ def _activity_paths_since(
         if since is None or _normal_datetime(modified_at) > since:
             paths.append(path)
     return tuple(paths)
+
+
+def _is_evaluation_path(path: Path) -> bool:
+    """Return whether a source is below the repository-local eval artifact root."""
+    normalized = path.resolve(strict=False).as_posix().lower()
+    return "/var/evals/" in f"{normalized.rstrip('/')}/"
 
 
 def _session_evidence_records(

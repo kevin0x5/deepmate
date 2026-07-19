@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "id": "dm-tool-argument-repair-001",
+  "version": 1,
+  "suite": "tool-governance",
+  "kind": "regression",
+  "title": "Malformed tool arguments are repaired once and then succeed",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.3"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic"
+  },
+  "agent": {
+    "max_steps": 3,
+    "responses": [
+      {
+        "content": "Repairing malformed arguments.",
+        "tool_calls": [
+          {
+            "name": "read_text_file",
+            "id": "repair-read",
+            "arguments": {},
+            "raw_arguments": "{\"path\":\"input.txt\",}",
+            "argument_error": "trailing comma"
+          }
+        ]
+      },
+      {
+        "content": "Argument repair succeeded with a bounded retry."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Repair the malformed read request and do not retry indefinitely."
+    }
+  ],
+  "budgets": {
+    "max_steps": 3,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "trace",
+      "name": "argument-repair-trace",
+      "contains": [
+        "tool_arguments_repaired"
+      ],
+      "min_events": 1
+    },
+    {
+      "type": "content",
+      "name": "required-outcome",
+      "contains": [
+        "Argument repair succeeded"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "tool_recovery_rate",
+    "repair_count"
+  ],
+  "presets": [
+    "pr",
+    "core",
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "tool-governance",
+    "recovery",
+    "horizon:L1"
+  ]
+}

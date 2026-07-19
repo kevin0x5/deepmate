@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "id": "dm-evo-skill-promotion-001",
+  "version": 1,
+  "suite": "evolution",
+  "kind": "regression",
+  "title": "Repeated successful workflow yields a verifiable skill draft",
+  "okr": {
+    "objective": "O3",
+    "key_results": [
+      "KR3.1"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic",
+    "checks": [
+      "evolution_evidence"
+    ],
+    "evolution_records": [
+      {
+        "kind": "workflow_success",
+        "signature": "read -> verify -> report",
+        "name": "Verified Report Workflow",
+        "description": "Read, verify, and report synthetic evidence.",
+        "steps": [
+          "Read fixture.",
+          "Run verifier.",
+          "Report evidence."
+        ],
+        "confidence": "0.9",
+        "source_group": "synthetic-1",
+        "source_ref": "synthetic-workflow-1"
+      },
+      {
+        "kind": "workflow_success",
+        "signature": "read -> verify -> report",
+        "name": "Verified Report Workflow",
+        "description": "Read, verify, and report synthetic evidence.",
+        "steps": [
+          "Read fixture.",
+          "Run verifier.",
+          "Report evidence."
+        ],
+        "confidence": "0.9",
+        "source_group": "synthetic-2",
+        "source_ref": "synthetic-workflow-2"
+      }
+    ]
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "Promoted one verified workflow candidate into a reviewable skill draft."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Evaluate the isolated self-evolution behavior using only synthetic evidence."
+    }
+  ],
+  "budgets": {
+    "max_steps": 2,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "observations.evolution_workflow_candidates",
+      "path": "observations.evolution_workflow_candidates",
+      "equals": 1
+    },
+    {
+      "type": "content",
+      "name": "skill-draft-outcome",
+      "contains": [
+        "reviewable skill draft"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "skill_promotion_precision"
+  ],
+  "presets": [
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "evolution",
+    "horizon:L2"
+  ]
+}

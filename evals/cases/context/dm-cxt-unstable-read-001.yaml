@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "dm-cxt-unstable-read-001",
+  "version": 1,
+  "suite": "context",
+  "kind": "regression",
+  "title": "Snapshot creation never reports a changing source as falsely stable",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.1"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/basic",
+    "checks": [
+      "snapshot_stability"
+    ]
+  },
+  "agent": {
+    "responses": [
+      {
+        "content": "Snapshot stability metadata was recorded for every context source."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Inspect the snapshot stability result."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "observations.snapshot_stable",
+      "path": "observations.snapshot_stable",
+      "equals": true
+    },
+    {
+      "type": "state",
+      "name": "snapshot-generation",
+      "path": "observations.snapshot_generation",
+      "truthy": true
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "context_fidelity",
+    "snapshot_stability"
+  ],
+  "presets": [
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "context",
+    "horizon:L1"
+  ]
+}

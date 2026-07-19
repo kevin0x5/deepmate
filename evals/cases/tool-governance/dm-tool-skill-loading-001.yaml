@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "id": "dm-tool-skill-loading-001",
+  "version": 1,
+  "suite": "tool-governance",
+  "kind": "regression",
+  "title": "Relevant skill card is loaded on demand from multiple candidates",
+  "okr": {
+    "objective": "O2",
+    "key_results": [
+      "KR2.3"
+    ]
+  },
+  "environment": {
+    "fixture": "workspaces/skills",
+    "schema_mode": "progressive"
+  },
+  "agent": {
+    "max_steps": 4,
+    "responses": [
+      {
+        "content": "Governed tool step 1.",
+        "tool_calls": [
+          {
+            "name": "read_text_file",
+            "id": "skill-read",
+            "arguments": {
+              "path": "skills/writer/SKILL.md"
+            }
+          }
+        ]
+      },
+      {
+        "content": "Loaded only synthetic-writer for the release-note task."
+      }
+    ]
+  },
+  "permissions": {
+    "mode": "read_only"
+  },
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Select and load the single skill needed for concise release notes."
+    }
+  ],
+  "budgets": {
+    "max_steps": 4,
+    "provider_attempts": 2
+  },
+  "graders": [
+    {
+      "type": "state",
+      "name": "one-skill-read",
+      "path": "observations.tool_calls",
+      "equals": [
+        "read_text_file"
+      ]
+    },
+    {
+      "type": "content",
+      "name": "required-outcome",
+      "contains": [
+        "synthetic-writer"
+      ]
+    }
+  ],
+  "hard_failures": [],
+  "metrics": [
+    "governed_tool_success",
+    "unnecessary_tool_rate"
+  ],
+  "presets": [
+    "pr",
+    "core",
+    "nightly",
+    "release"
+  ],
+  "tags": [
+    "tool-governance",
+    "horizon:L1"
+  ]
+}

@@ -64,3 +64,16 @@ deepmate = [
   "pet_ui/renderer/*.js",
   "pet_ui/renderer/styles/*.css",
 ]
+
+[tool.pytest.ini_options]
+testpaths = [
+  "tests",
+  "evals/tests",
+]
+norecursedirs = [
+  ".git",
+  ".pytest_cache",
+  "build",
+  "dist",
+  "var",
+]

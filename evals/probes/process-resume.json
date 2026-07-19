@@ -1,0 +1,4 @@
+{
+  "category": ["artifact", "decision", "continuation"],
+  "expected_facts": ["synthetic-checkpoint-2", "denied-approval-preserved", "continue-step-3"]
+}
