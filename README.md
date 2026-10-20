@@ -15,6 +15,9 @@ Deepmate is a cost-first local AI workbench for long-running project work, with 
 - **Local model deployment** — Preflight disk space, resume or cancel Ollama downloads, deduplicate concurrent preparation, verify inference, and switch models from Deepmate.
 - **Self-evolution** — Mine scoped, confidence-filtered traces, sessions, activity notes, corrections, and successful workflows into auditable behavior hints, failure guards, generated skill drafts, and capability state.
 
+![Uploading Clipboard_Screenshot_1792478399.png…]()
+
+
 ## Install
 
 Requirements: Python 3.11+ and a DeepSeek API key.
