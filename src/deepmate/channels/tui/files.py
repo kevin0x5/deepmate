@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import os
 import shlex
 import subprocess
@@ -150,7 +151,9 @@ def workspace_file_matches(
     clean_query = query.strip().lower()
     matches: list[str] = []
     scanned = 0
-    for path in _iter_workspace_files(root):
+    if limit <= 0 or max_scan <= 0:
+        return ()
+    for path in _iter_workspace_files(root, root):
         scanned += 1
         if scanned > max_scan:
             break
@@ -195,14 +198,29 @@ def read_workspace_file_preview(
         raise ValueError(f"file not found: {relative_path}")
     safe_offset = max(0, int(offset))
     safe_max = max(1, int(max_bytes))
-    total = target.stat().st_size
-    start = min(safe_offset, total)
     with target.open("rb") as file:
-        file.seek(start)
+        total = os.fstat(file.fileno()).st_size
+        start = min(safe_offset, total)
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        lookbehind = min(3, start)
+        file.seek(start - lookbehind)
+        decoder.decode(file.read(lookbehind))
+        prefix = decoder.getstate()[0]
+        if prefix and start < total and b"\x80" <= file.peek(1)[:1] < b"\xc0":
+            start -= len(prefix)
+            file.seek(start)
+        decoder.reset()
         data = file.read(safe_max)
-    end = start + len(data)
+        content = decoder.decode(data, final=len(data) < safe_max or file.tell() >= total)
+        # With a one-byte budget, finish the first character so every page advances.
+        while not content and data and file.tell() < total:
+            following = file.read(1)
+            content = decoder.decode(following, final=not following or file.tell() >= total)
+            if not following:
+                break
+        end = file.tell() - len(decoder.getstate()[0])
     return TuiFilePreview(
-        content=data.decode("utf-8", errors="replace"),
+        content=content,
         path=relative_path,
         start=start,
         end=end,
@@ -222,30 +240,34 @@ def workspace_diff(workspace: str | Path, *, max_chars: int = 100_000) -> str:
         message = (status_result.stderr or status_result.stdout).strip()
         return _git_unavailable_message(message)
     status_files = _parse_status_files(status_result.stdout)
-    numstat_result = _git(root, "diff", "--numstat", "--no-ext-diff", "--")
-    numstat = (
-        _parse_numstat(numstat_result.stdout)
-        if numstat_result is not None and numstat_result.returncode == 0
-        else {}
-    )
-    diff_result = _git(root, "diff", "--no-ext-diff", "--", timeout=10)
-    if diff_result is None:
-        return "No git diff is available for this workspace."
-    if diff_result.returncode != 0:
-        message = (diff_result.stderr or diff_result.stdout).strip()
-        return _git_unavailable_message(message)
+    if not status_files:
+        return "No workspace diff."
+    statuses = [line[:2] for line in status_result.stdout.splitlines() if len(line) >= 4]
+    sections = []
+    numstat: dict[str, tuple[int | None, int | None]] = {}
+    for column, title, flags in ((0, "Staged", ("--cached",)), (1, "Working tree", ())):
+        if not any(status[column] not in " ?!" for status in statuses):
+            continue
+        stats = _git(root, "diff", *flags, "--numstat", "--no-ext-diff", "--")
+        if stats is not None and stats.returncode == 0:
+            for path, counts in _parse_numstat(stats.stdout).items():
+                previous = numstat.get(path)
+                if previous is None or None in counts or None in previous:
+                    numstat[path] = counts
+                else:
+                    numstat[path] = (previous[0] + counts[0], previous[1] + counts[1])
+        result = _git(root, "diff", *flags, "--no-ext-diff", "--")
+        if result is None:
+            return "No git diff is available for this workspace."
+        if result.returncode:
+            return _git_unavailable_message((result.stderr or result.stdout).strip())
+        if result.stdout.strip():
+            sections.append(f"{title}\n{result.stdout.rstrip()}")
     changed_files = tuple(
-        TuiDiffFile(
-            path=file.path,
-            status=file.status,
-            added=_numstat_for_path(numstat, file.path)[0],
-            deleted=_numstat_for_path(numstat, file.path)[1],
-        )
+        TuiDiffFile(file.path, file.status, *_numstat_for_path(numstat, file.path))
         for file in status_files
     )
-    diff = diff_result.stdout.strip()
-    if not changed_files and not diff:
-        return "No workspace diff."
+    diff = "\n\n".join(sections)
     if len(diff) > max_chars:
         diff = diff[: max_chars - 35].rstrip() + "\n\n[diff truncated by Deepmate TUI]"
     return _render_diff_report(changed_files, diff)
@@ -297,10 +319,11 @@ def _git(
 ) -> subprocess.CompletedProcess[str] | None:
     try:
         return subprocess.run(
-            ("git", "-C", str(root), *args),
+            ("git", "-C", str(root), "-c", "core.quotepath=false", *args),
             check=False,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -371,26 +394,22 @@ def _normalize_diff_path(path: str) -> str:
 
 
 def _render_diff_report(files: tuple[TuiDiffFile, ...], diff: str) -> str:
-    lines = ["Workspace diff"]
+    count = len(files)
+    summary = f"{count} file{'s' if count != 1 else ''} changed"
+    lines = [summary]
     if files:
         added = sum(file.added or 0 for file in files)
         deleted = sum(file.deleted or 0 for file in files)
-        lines.append(f"- changed files: {len(files)}")
-        if added or deleted:
-            lines.append(f"- lines: +{added} / -{deleted}")
-        lines.append("")
-        lines.append("Files")
+        if count > 1 and (added or deleted):
+            lines[0] += f"  ·  +{added} -{deleted}"
         for file in files[:40]:
-            line = f"- {file.status}: {file.path}"
+            line = f"  {file.status}: {file.path}"
             if file.added is not None or file.deleted is not None:
                 line += f" (+{file.added or 0}/-{file.deleted or 0})"
             lines.append(line)
         if len(files) > 40:
             lines.append(f"- ... +{len(files) - 40} more")
-    else:
-        lines.append("- changed files: 0")
     lines.append("")
-    lines.append("Raw diff")
     if diff:
         lines.append(diff)
     else:
@@ -432,9 +451,9 @@ def _iter_workspace_entries(root: Path, *, expanded_dirs: frozenset[str]):
     yield from _iter_workspace_entries_recursive(root, root, expanded_dirs=expanded_dirs)
 
 
-def _iter_workspace_files(root: Path):
+def _iter_workspace_files(root: Path, current: Path):
     try:
-        entries = tuple(root.iterdir())
+        entries = tuple(current.iterdir())
     except OSError:
         return
     directories = sorted(
@@ -456,7 +475,7 @@ def _iter_workspace_files(root: Path):
     for file_path in files:
         yield file_path
     for directory in directories:
-        yield from _iter_workspace_files(directory)
+        yield from _iter_workspace_files(root, directory)
 
 
 def _iter_workspace_entries_recursive(

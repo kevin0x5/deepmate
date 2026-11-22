@@ -107,15 +107,13 @@ class OllamaLocalRuntime:
             ValueError,
             json.JSONDecodeError,
             UnicodeDecodeError,
-        ) as exc:
+        ):
             if installed:
-                message = "Ollama is installed but not running."
+                message = f"无法连接 {self._api_url}。请启动 Ollama 服务后重试。"
             else:
-                message = "Ollama is not installed."
-            if str(exc).strip():
-                message += f" {exc}"
+                message = "未检测到 Ollama。安装后可以准备本地模型。"
         return LocalModelStatus(
-            available=installed and running,
+            available=running,
             installed=installed,
             running=running,
             version=version,
@@ -165,7 +163,7 @@ class OllamaLocalRuntime:
     def prepared_model(self, *, start_server: bool = True) -> LocalModelPreset | None:
         """Return an already installed Deepmate local model without downloading."""
         status = self.ensure_ready() if start_server else self.status()
-        if not status.installed or not status.running:
+        if not status.running:
             return None
         from deepmate.local.presets import local_model_presets, recommended_local_model
 
@@ -223,6 +221,8 @@ class OllamaLocalRuntime:
         cancellation_token: LocalModelCancellationToken | None = None,
     ) -> LocalModelInstallResult:
         """Ensure Ollama is running and the requested model is available."""
+        if _cancelled(cancellation_token):
+            return _cancelled_result(preset, state_store)
         previous = state_store.load() if state_store is not None else None
         if (
             previous is not None
@@ -260,7 +260,7 @@ class OllamaLocalRuntime:
         status = self.ensure_ready()
         if _cancelled(cancellation_token):
             return _cancelled_result(preset, state_store)
-        if not status.installed and not install_missing_runtime:
+        if not status.running and not status.installed and not install_missing_runtime:
             result = LocalModelInstallResult(
                 ok=False,
                 preset=preset,
@@ -270,12 +270,13 @@ class OllamaLocalRuntime:
             )
             _record_result(state_store, result)
             return result
-        if not status.installed:
-            _record_state(
-                state_store,
-                preset,
+        if not status.running and not status.installed:
+            _emit_progress(
+                progress,
                 "installing",
                 f"正在准备本地模型运行组件 · {preset.short_label}",
+                preset=preset,
+                state_store=state_store,
             )
             installed = self.install_runtime(preset)
             if not installed.ok:
@@ -306,6 +307,13 @@ class OllamaLocalRuntime:
                 message="本地模型服务暂时没有启动成功，请稍后重试 /local。",
             )
         if not self.has_model(preset):
+            if not status.installed:
+                result = LocalModelInstallResult(
+                    ok=False, preset=preset,
+                    message=f"服务已连接。请在运行 Ollama 的机器上执行 ollama pull {preset.ollama_ref}，再输入 /local。",
+                )
+                _record_result(state_store, result)
+                return result
             disk_result = self.disk_preflight(preset)
             if disk_result is not None:
                 _record_result(state_store, disk_result)
@@ -317,7 +325,10 @@ class OllamaLocalRuntime:
                 cancellation_token=cancellation_token,
             )
             if not pulled.ok:
-                _record_result(state_store, pulled)
+                # pull records cancellation and timeout at the point of failure.
+                saved = state_store.load() if state_store is not None else None
+                if saved is None or saved.status != "failed" or saved.message != pulled.message:
+                    _record_result(state_store, pulled)
                 return pulled
         if _cancelled(cancellation_token):
             return _cancelled_result(preset, state_store)
@@ -447,6 +458,7 @@ class OllamaLocalRuntime:
         try:
             result = subprocess.run(
                 ("ollama", "cp", preset.ollama_ref, preset.runtime_name),
+                env={**os.environ, "OLLAMA_HOST": self._api_url},
                 check=False,
                 capture_output=True,
                 text=True,
@@ -525,6 +537,7 @@ class OllamaLocalRuntime:
         try:
             process = subprocess.Popen(
                 command,
+                env={**os.environ, "OLLAMA_HOST": self._api_url},
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -543,23 +556,27 @@ class OllamaLocalRuntime:
             )
         output_lines: deque[str] = deque(maxlen=20)
         deadline = time.monotonic() + 60 * 60
-        stream_events: queue.Queue[str | None] = queue.Queue(maxsize=128)
+        stream_events: queue.Queue[str] = queue.Queue(maxsize=128)
+        stop_reading = threading.Event()
+        output_done = threading.Event()
         assert process.stdout is not None
 
         def read_output() -> None:
             try:
-                while True:
+                while not stop_reading.is_set():
                     line = process.stdout.readline()
                     if line == "":
                         break
-                    stream_events.put(line)
+                    while not stop_reading.is_set():
+                        try:
+                            stream_events.put(line, timeout=0.1)
+                            break
+                        except queue.Full:
+                            continue
             except (OSError, ValueError):
                 pass
             finally:
-                try:
-                    stream_events.put_nowait(None)
-                except queue.Full:
-                    pass
+                output_done.set()
 
         reader = threading.Thread(
             target=read_output,
@@ -567,7 +584,7 @@ class OllamaLocalRuntime:
             daemon=True,
         )
         reader.start()
-        stream_ended = False
+        last_percent = None
         try:
             while True:
                 if _cancelled(cancellation_token):
@@ -599,31 +616,24 @@ class OllamaLocalRuntime:
                     )
                     return result
                 try:
-                    event = stream_events.get(timeout=min(0.25, remaining))
+                    line = stream_events.get(timeout=min(0.25, remaining))
                 except queue.Empty:
-                    if process.poll() is not None and stream_events.empty():
+                    if output_done.is_set() and process.poll() is not None and stream_events.empty():
                         break
                     continue
-                if event is None:
-                    stream_ended = True
-                else:
-                    line = event
-                    clean = line.strip()
-                    if clean:
-                        output_lines.append(clean)
-                    percent = _progress_percent(line)
-                    if percent is not None:
-                        _emit_progress(
-                            progress,
-                            "downloading",
-                            f"正在下载本地模型 · {preset.short_label} · {percent}%",
-                            percent=percent,
-                            preset=preset,
-                            state_store=state_store,
-                        )
-                if stream_ended and process.poll() is not None and stream_events.empty():
-                    break
+                clean = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line).strip()
+                if clean:
+                    output_lines.append(clean)
+                percent = _progress_percent(clean)
+                if percent is not None and percent != last_percent:
+                    last_percent = percent
+                    _emit_progress(
+                        progress, "downloading",
+                        f"正在下载本地模型 · {preset.short_label} · {percent}%",
+                        percent=percent, preset=preset, state_store=state_store,
+                    )
         finally:
+            stop_reading.set()
             if process.stdout is not None:
                 process.stdout.close()
             reader.join(timeout=0.2)
@@ -705,6 +715,7 @@ class OllamaLocalRuntime:
         try:
             subprocess.Popen(
                 ("ollama", "serve"),
+                env={**os.environ, "OLLAMA_HOST": self._api_url},
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,

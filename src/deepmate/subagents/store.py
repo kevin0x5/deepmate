@@ -100,13 +100,11 @@ class SubagentResultStore:
         if not _REF_RE.match(clean_ref):
             return None
         path = self._path_for_ref(clean_ref)
-        with file_lock(self._session_dir / ".result-store"):
-            if not path.exists():
-                return None
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                return None
+        # Each result is published once with an atomic rename.
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
         if not isinstance(payload, dict):
             return None
         record = _record_from_payload(payload)

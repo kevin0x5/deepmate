@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from xml.sax.saxutils import escape
 
 from deepmate.domain import Message, MessageRole
-from deepmate.providers import ModelConversationItem, ModelProvider, ModelRequest
-from deepmate.tasks.json_helpers import strip_fenced_json
+from deepmate.providers import (
+    ModelCapabilities,
+    ModelConversationItem,
+    ModelProvider,
+    ModelRequest,
+)
+from deepmate.tasks.json_helpers import strip_fenced_json, task_request_options
 from deepmate.tasks.render import (
     TaskDocuments,
     TaskStage,
@@ -136,6 +143,8 @@ def generate_task_update(
     user_prompt: str,
     final_answer: str,
     achievement_required: bool = False,
+    options: Mapping[str, object] | None = None,
+    capabilities: ModelCapabilities | None = None,
 ) -> TaskUpdateResult:
     """Generate a Task Mode file update from the completed user turn."""
     request = ModelRequest(
@@ -157,7 +166,8 @@ def generate_task_update(
                 )
             ),
         ),
-        options={"temperature": 0, "max_tokens": 1400},
+        options=task_request_options(options, max_tokens=1400),
+        capabilities=capabilities or ModelCapabilities(),
     )
     response = provider.complete(request)
     try:
@@ -229,11 +239,11 @@ def apply_task_update_result(
                 )
             plan_content = result.plan_md
     evolution_updater = (
-        lambda current: update_evolution_markdown(
-                current,
-                rolling_summary=result.rolling_summary,
-                timeline_entry=result.timeline_entry,
-            )
+        partial(
+            update_evolution_markdown,
+            rolling_summary=result.rolling_summary,
+            timeline_entry=result.timeline_entry,
+        )
         if result.rolling_summary or result.timeline_entry.strip()
         else None
     )

@@ -266,11 +266,13 @@ class CapabilityStateStore:
         if not policy.is_ready():
             raise ValueError("skill temperature policy thresholds are invalid")
         with file_lock(self.path):
+            previous = self._load_unlocked()
             states = {
                 capability_id: _cooled_state(state, current_time, policy)
-                for capability_id, state in self._load_unlocked().items()
+                for capability_id, state in previous.items()
             }
-            self._save_unlocked(states)
+            if states != previous:
+                self._save_unlocked(states)
         return states
 
     def skill_states_by_name(self) -> dict[str, CapabilityState]:

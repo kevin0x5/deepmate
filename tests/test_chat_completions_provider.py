@@ -23,6 +23,7 @@ from deepmate.providers.chat_completions import (
     MAX_MODEL_STREAM_LINE_BYTES,
     _http_error,
     _post_json,
+    _parse_usage,
     _read_error_detail,
     _request_payload,
     sanitize_model_request,
@@ -30,6 +31,20 @@ from deepmate.providers.chat_completions import (
 
 
 class ChatCompletionsProviderTests(unittest.TestCase):
+    def test_cache_usage_normalizes_reported_counts_and_preserves_absence(self) -> None:
+        cases = (
+            ({"prompt_tokens_details": {"cached_tokens": 40}}, (40, 60)),
+            ({"prompt_tokens_details": {"cached_tokens": 0}}, (0, 100)),
+            ({"prompt_cache_hit_tokens": 25, "prompt_tokens_details": {"cached_tokens": 40}}, (25, 75)),
+            ({"prompt_cache_miss_tokens": 90}, (10, 90)),
+            ({"prompt_tokens_details": {"cached_tokens": None}}, (0, 0)),
+            ({}, (0, 0)),
+        )
+        for details, expected in cases:
+            with self.subTest(details=details):
+                usage = _parse_usage({"prompt_tokens": 100, **details})
+                self.assertEqual((usage.cache_hit_input_tokens, usage.cache_miss_input_tokens), expected)
+
     def test_request_payload_rejects_reserved_native_mcp_name(self) -> None:
         request = _request_with_tools(
             (
@@ -441,6 +456,35 @@ class ChatCompletionsProviderTests(unittest.TestCase):
         exchange = sanitized.conversation[1].tool_exchange
         self.assertIsNotNone(exchange)
         self.assertEqual(exchange.assistant_reasoning, "")
+
+    def test_plain_assistant_reasoning_is_replayed_only_for_thinking_requests_with_tools(self):
+        item = ModelConversationItem.from_message(
+            Message(role=MessageRole.ASSISTANT, content="First answer."),
+            assistant_reasoning="reasoning from the previous turn",
+        )
+        schema = {
+            "name": "read_label",
+            "description": "Read a sample label.",
+            "input_schema": {"type": "object"},
+        }
+        cases = [
+            ("enabled", True, True, True),
+            ("enabled", False, True, False),
+            ("disabled", True, True, False),
+            ("enabled", True, False, False),
+        ]
+        for thinking, with_tools, replay_capability, expected in cases:
+            with self.subTest(thinking=thinking, tools=with_tools, replay=replay_capability):
+                request = ModelRequest(
+                    model="deepseek-flash",
+                    conversation=(item,),
+                    tool_schemas=(schema,) if with_tools else (),
+                    options={"thinking": {"type": thinking}},
+                    capabilities=ModelCapabilities(supports_assistant_reasoning_replay=replay_capability),
+                )
+                message = _request_payload(sanitize_model_request(request))["messages"][0]
+                self.assertEqual(message["content"], "First answer.")
+                self.assertEqual(message.get("reasoning_content"), item.assistant_reasoning if expected else None)
 
     def test_complete_stream_omits_stream_usage_when_capability_disabled(self) -> None:
         captured = {}

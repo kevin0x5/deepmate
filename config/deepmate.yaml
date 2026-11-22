@@ -39,7 +39,7 @@ provider:
 
 model_context_windows:
   default: 1000000
-  deepseek-v4-flash: 1000000
+  deepseek-flash: 1000000
   deepseek-v4-pro: 1000000
 
 context:
@@ -61,17 +61,17 @@ subagents:
 
 models:
   memory:
-    model: deepseek-v4-flash
+    model: deepseek-flash
     thinking: disabled
     temperature: 0
     max_tokens: 1200
   summary:
-    model: deepseek-v4-flash
+    model: deepseek-flash
     thinking: disabled
     temperature: 0
     max_tokens: 5000
   subagent_worker:
-    model: deepseek-v4-flash
+    model: deepseek-flash
     thinking: disabled
     temperature: 0
     max_tokens: 1200

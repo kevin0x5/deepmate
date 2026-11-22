@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self';">
@@ -7,32 +7,35 @@
   </head>
   <body>
     <main class="hud">
+      <header>
+        <span class="kicker" id="kind">桌宠</span>
+        <button id="close-panel" type="button" aria-label="关闭面板" title="关闭面板 (Esc)">×</button>
+      </header>
       <section>
-        <div class="kicker" id="kind">Deepmate</div>
-        <h1 id="title">Current work</h1>
-        <p id="summary">Deepmate is ready.</p>
-        <dl class="facts" aria-label="Current work facts">
+        <h1 id="title">当前工作</h1>
+        <p id="summary">等待任务。</p>
+        <dl class="facts" aria-label="任务信息">
           <div>
-            <dt>Project</dt>
+            <dt>项目</dt>
             <dd id="project">-</dd>
           </div>
           <div>
-            <dt>Status</dt>
-            <dd id="status">idle</dd>
+            <dt>状态</dt>
+            <dd id="status">空闲</dd>
           </div>
         </dl>
-        <ol id="timeline" class="timeline" aria-label="Recent progress"></ol>
+        <ol id="timeline" class="timeline" aria-label="关联内容"></ol>
       </section>
       <div id="feedback" class="feedback" hidden>
-        <button id="feedback-useful" type="button">Useful</button>
-        <button id="feedback-less" type="button">Less often</button>
+        <button id="feedback-useful" type="button">有帮助</button>
+        <button id="feedback-less" type="button">减少此类提醒</button>
       </div>
       <div class="actions">
-        <button id="open-current" type="button">Open current work</button>
-        <button id="mute" type="button">Quiet mode</button>
-        <button id="mini" type="button">Mini mode</button>
-        <button id="hide-bubble" type="button">Hide bubble</button>
-        <button id="quit" class="secondary" type="button">Quit</button>
+        <button id="open-current" type="button">打开当前工作</button>
+        <button id="mute" type="button">静音一小时</button>
+        <button id="mini" type="button">贴边收起</button>
+        <button id="hide-bubble" type="button">收起气泡</button>
+        <button id="quit" class="secondary" type="button">退出桌宠</button>
       </div>
     </main>
     <script src="hud.js"></script>

@@ -9,6 +9,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from deepmate.providers.usage import reported_cache_hit_ratio
+
 MODEL_EVENT_KINDS = {
     "model_request_prefix_fingerprint",
     "model_request_started",
@@ -41,9 +43,7 @@ class TraceUsageSummary:
 
     def cache_hit_ratio(self) -> float | None:
         """Return cache hit ratio over input tokens when available."""
-        if self.input_tokens <= 0:
-            return None
-        return self.cache_hit_input_tokens / self.input_tokens
+        return reported_cache_hit_ratio(self.cache_hit_input_tokens, self.cache_miss_input_tokens)
 
 
 def trace_record_kind(record: Mapping[str, object]) -> str:

@@ -4,6 +4,7 @@ import json
 import io
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +19,7 @@ from deepmate.domain import (
 )
 from deepmate.mcp import (
     McpCallResult,
+    McpExposure,
     McpServerInventory,
     McpServerSpec,
     McpToolCatalog,
@@ -466,6 +468,24 @@ class McpProgressiveDisclosureTests(unittest.TestCase):
         self.assertIn("tier=idle", refs[0].description)
         self.assertIn("7 days", refs[0].description)
         self.assertEqual(refs[1].description, "")
+
+    def test_schema_preload_respects_exposure_age_and_tied_timestamps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = McpUsageStateStore.in_data_dir(Path(tmp), "default")
+            start = datetime(2026, 6, 1, tzinfo=UTC)
+            tools = (_read_tool(), _inspect_metadata_tool())
+            for tool in tools:
+                store.record_tool_invoked(tool, now=start)
+            inventory = McpServerInventory(server=_server(), tools=tools)
+            catalog = McpToolCatalog((inventory,), state_store=store, now=start)
+            self.assertEqual(catalog.default_schema_tools(1_000_000), tools)
+            manual = replace(inventory, server=replace(inventory.server, exposure=McpExposure.MANUAL))
+            self.assertEqual(replace(catalog, inventories=(manual,)).default_schema_tools(1_000_000), ())
+            stale = replace(catalog, now=start + timedelta(days=8))
+            self.assertEqual(stale.default_schema_tools(1_000_000), ())
+            self.assertEqual(stale.get_tool(tools[0].qualified_name()), tools[0])
+            store.record_tool_invoked(tools[1], now=stale.now)
+            self.assertEqual(stale.default_schema_tools(1_000_000), (tools[1],))
 
     def test_load_mcp_tool_adds_schema_for_followup_step(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

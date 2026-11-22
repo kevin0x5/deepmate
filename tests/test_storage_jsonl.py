@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import gc
 import json
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -50,35 +53,28 @@ class JsonlWriterTests(unittest.TestCase):
 
             fsync.assert_called_once()
 
-    def test_path_lock_cache_prunes_unlocked_entries(self) -> None:
+    def test_registry_retains_only_locks_with_live_writers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            old_locks = dict(jsonl_storage._PATH_LOCKS)
-            try:
-                jsonl_storage._PATH_LOCKS.clear()
-                with patch("deepmate.storage.jsonl.MAX_PATH_LOCKS", 4):
-                    for index in range(12):
-                        jsonl_storage._path_lock(root / f"events-{index}.jsonl")
-                self.assertLessEqual(len(jsonl_storage._PATH_LOCKS), 4)
-            finally:
-                jsonl_storage._PATH_LOCKS.clear()
-                jsonl_storage._PATH_LOCKS.update(old_locks)
+            root = Path(tmp).resolve()
+            writer = JsonlWriter(root / "active.jsonl")
+            for index in range(12):
+                JsonlWriter(root / f"other-{index}.jsonl")
+            gc.collect()
+            self.assertIs(JsonlWriter(writer.path)._lock, writer._lock)
+            self.assertEqual([path for path in jsonl_storage._PATH_LOCKS if path.parent == root], [writer.path])
 
-    def test_path_lock_cache_does_not_prune_live_writer_lock(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            old_locks = dict(jsonl_storage._PATH_LOCKS)
-            try:
-                jsonl_storage._PATH_LOCKS.clear()
-                writer = JsonlWriter(root / "active.jsonl")
-                active_lock = writer._lock
-                with patch("deepmate.storage.jsonl.MAX_PATH_LOCKS", 4):
-                    for index in range(12):
-                        jsonl_storage._path_lock(root / f"events-{index}.jsonl")
-                self.assertIs(JsonlWriter(root / "active.jsonl")._lock, active_lock)
-            finally:
-                jsonl_storage._PATH_LOCKS.clear()
-                jsonl_storage._PATH_LOCKS.update(old_locks)
+    def test_collecting_a_writer_during_registry_lookup_does_not_deadlock(self) -> None:
+        # Run in a child so a regression cannot hang the rest of the suite.
+        code = """
+import gc
+from deepmate.storage.jsonl import JsonlWriter, _LOCKS_GUARD
+writer = JsonlWriter("gc-check.jsonl")
+writer.cycle = writer
+del writer
+with _LOCKS_GUARD:
+    gc.collect()
+"""
+        subprocess.run([sys.executable, "-c", code], check=True, timeout=5)
 
 
 if __name__ == "__main__":

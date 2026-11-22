@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from deepmate.activity import ActivityEntry, ActivityStore, preview_activity_text
 
 
 class ActivityStoreTests(unittest.TestCase):
+    def test_parallel_monthly_updates_preserve_each_day(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ActivityStore(tmp)
+            dates = [f"2026-05-{day:02}" for day in range(1, 15)]
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(lambda date: store.upsert_monthly_summary_entry(date, date), dates))
+            content = store.monthly_summary_path("2026-05").read_text(encoding="utf-8")
+            for date in dates:
+                self.assertEqual(content.count(f"## {date}\n"), 1)
+
     def test_append_daily_entry_creates_date_file_with_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = ActivityStore(Path(tmp) / "activity" / "default")

@@ -62,6 +62,7 @@ deepmate = [
   "pet_ui/electron/*.js",
   "pet_ui/renderer/*.html",
   "pet_ui/renderer/*.js",
+  "pet_ui/renderer/portraits.json",
   "pet_ui/renderer/styles/*.css",
 ]
 

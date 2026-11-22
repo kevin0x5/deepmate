@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const portraits = require('../renderer/portraits.json');
 
 if (process.argv.includes('--help')) {
   console.log('Usage: electron electron/main.js --data-dir <path>');
@@ -29,6 +30,7 @@ let bubbleTimer = null;
 let pollTimer = null;
 let smokeCaptureDir = '';
 let smokeCaptureTimer = null;
+const jsonCache = new Map();
 
 function parseArgs(argv) {
   const args = argv.slice(2);
@@ -49,9 +51,16 @@ function parseArgs(argv) {
 
 function readJson(file, fallback = {}) {
   try {
+    const stat = fs.statSync(file, { bigint: true });
+    const signature = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    const cached = jsonCache.get(file);
+    if (cached && cached.signature === signature) return cached.payload;
     const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : fallback;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return fallback;
+    jsonCache.set(file, { signature, payload });
+    return payload;
   } catch (_error) {
+    jsonCache.delete(file);
     return fallback;
   }
 }
@@ -147,11 +156,16 @@ function windowOptions(width, height, extra = {}) {
 
 function createWindows() {
   const host = loadHostState();
-  const display = screen.getPrimaryDisplay().workArea;
-  const x = clamp(Number.isInteger(host.x) ? host.x : display.x + display.width - PET_WIDTH - 34, display.x, display.x + display.width - PET_WIDTH);
+  const savedPosition = Number.isInteger(host.x) && Number.isInteger(host.y);
+  const display = (savedPosition
+    ? screen.getDisplayMatching({ x: host.x, y: host.y, width: PET_WIDTH, height: PET_HEIGHT })
+    : screen.getPrimaryDisplay()).workArea;
+  const inset = host.mini || host.collapsed ? PET_WIDTH - MINI_VISIBLE_WIDTH : 0;
+  const x = clamp(savedPosition ? host.x : display.x + display.width - PET_WIDTH - 34, display.x - inset, display.x + display.width - PET_WIDTH + inset);
   const y = clamp(Number.isInteger(host.y) ? host.y : display.y + Math.round(display.height * 0.22), display.y, display.y + display.height - PET_HEIGHT);
 
   petWindow = new BrowserWindow(windowOptions(PET_WIDTH, PET_HEIGHT));
+  petWindow.setIgnoreMouseEvents(true, { forward: true });
   petWindow.setPosition(x, y);
   applyFloatingLevel(petWindow);
   petWindow.loadFile(path.join(__dirname, '..', 'renderer', 'pet.html'));
@@ -284,7 +298,11 @@ function sendPetState() {
 
 function sendHudState() {
   if (hudWindow) {
-    hudWindow.webContents.send('pet-hud', latestState || {});
+    hudWindow.webContents.send('pet-hud', {
+      ...(latestState || {}),
+      canOpenWork: canOpenCurrentWork(latestState),
+      bubbleVisible: Boolean(bubbleWindow && bubbleWindow.isVisible())
+    });
   }
 }
 
@@ -337,6 +355,7 @@ function positionBubble() {
   if (bx < display.x + 8) {
     bx = x + PET_WIDTH - 36;
   }
+  bx = clamp(bx, display.x + 8, display.x + display.width - BUBBLE_WIDTH - 8);
   by = clamp(by, display.y + 8, display.y + display.height - BUBBLE_HEIGHT - 8);
   bubbleWindow.setPosition(Math.round(bx), Math.round(by), false);
 }
@@ -346,6 +365,7 @@ function showBubble(state) {
   positionBubble();
   bubbleWindow.webContents.send('pet-bubble', state.bubble || {});
   bubbleWindow.showInactive();
+  if (hudWindow && hudWindow.isVisible()) sendHudState();
   maybeRunSmokeCapture();
   if (bubbleTimer) clearTimeout(bubbleTimer);
   const bubble = state.bubble || {};
@@ -396,7 +416,10 @@ function hideBubble() {
     clearTimeout(bubbleTimer);
     bubbleTimer = null;
   }
-  if (bubbleWindow && bubbleWindow.isVisible()) bubbleWindow.hide();
+  if (bubbleWindow && bubbleWindow.isVisible()) {
+    bubbleWindow.hide();
+    if (hudWindow && hudWindow.isVisible()) sendHudState();
+  }
 }
 
 function positionHud() {
@@ -416,7 +439,7 @@ function positionHud() {
 function showHud() {
   if (!hudWindow) return;
   positionHud();
-  hudWindow.webContents.send('pet-hud', latestState || {});
+  sendHudState();
   hudWindow.show();
 }
 
@@ -442,19 +465,20 @@ function showMenu() {
   const mini = Boolean(host.mini || host.collapsed);
   const menu = Menu.buildFromTemplate([
     {
-      label: 'Open Current Work',
+      label: '打开当前工作',
+      enabled: canOpenCurrentWork(latestState),
       click: () => openCurrentWork()
     },
     {
-      label: muted ? 'Exit Quiet Mode' : 'Quiet 1h',
+      label: muted ? '结束静音' : '静音一小时',
       click: () => toggleQuietOneHour()
     },
     {
-      label: mini ? 'Exit Mini Mode' : 'Mini Mode',
+      label: mini ? '退出贴边模式' : '贴边收起',
       click: () => setMini(!mini)
     },
     {
-      label: bubbleWindow && bubbleWindow.isVisible() ? 'Hide Bubble' : 'Show Status',
+      label: bubbleWindow && bubbleWindow.isVisible() ? '收起气泡' : '显示状态',
       click: () => {
         if (bubbleWindow && bubbleWindow.isVisible()) {
           hideBubble();
@@ -472,7 +496,7 @@ function showMenu() {
     },
     { type: 'separator' },
     {
-      label: 'Close',
+      label: '退出桌宠',
       click: () => app.quit()
     }
   ]);
@@ -573,11 +597,15 @@ function pointForWindow(win) {
   return { x, y };
 }
 
+function canOpenCurrentWork(state) {
+  if (!state) return false;
+  const actions = Array.isArray(state.actions) ? state.actions : [];
+  return Boolean(state.session_id || state.workspace || actions.some((action) => action && action.id === 'open_current_work'));
+}
+
 function openCurrentWork() {
   const state = latestState || {};
-  const actions = Array.isArray(state.actions) ? state.actions : [];
-  const hasAction = actions.some((action) => action && action.id === 'open_current_work');
-  if (!hasAction && !state.session_id && !state.workspace) {
+  if (!canOpenCurrentWork(state)) {
     showBubble({
       bubble: {
         text: '当前没有可打开的工作。',
@@ -657,7 +685,8 @@ ipcMain.on('pet-mouse-region', (_event, active) => {
 });
 ipcMain.on('pet-renderer-ready', (_event, surface) => {
   const name = String(surface || '');
-  if (name === 'pet') {
+  if (name === 'pet' && petWindow) {
+    petWindow.webContents.send('pet-portraits', portraits);
     sendPetState();
   } else if (name === 'bubble' && latestState && bubbleWindow) {
     bubbleWindow.webContents.send('pet-bubble', latestState.bubble || {});

@@ -22,6 +22,14 @@ from deepmate.trace import (
 
 
 class TraceSemanticTests(unittest.TestCase):
+    def test_session_cache_ratio_uses_only_requests_with_cache_accounting(self) -> None:
+        unknown = {"kind": "model_response_received", "refs": ["input_tokens=100"]}
+        measured = {"kind": "model_response_received", "refs": [
+            "input_tokens=100", "cache_hit_input_tokens=80", "cache_miss_input_tokens=20",
+        ]}
+        self.assertIsNone(summarize_trace_usage((unknown,)).cache_hit_ratio())
+        self.assertEqual(summarize_trace_usage((unknown, measured)).cache_hit_ratio(), 0.8)
+
     def test_trace_record_matches_session_refs(self) -> None:
         record = {
             "kind": "subagent_run_completed",

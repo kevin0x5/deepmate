@@ -106,6 +106,22 @@ def qa_command(text: str, *, workspace: Path, provider: FakeQaProvider | None = 
 
 
 class QaAuditTests(unittest.TestCase):
+    def test_discovery_uses_project_sources_and_bounded_prefixes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "tools" / "project"
+            dependencies = root / "node_modules" / "cli"
+            dependencies.mkdir(parents=True)
+            (dependencies / "main.py").write_text("fastapi openai", encoding="utf-8")
+            (dependencies / "samples.csv").touch()
+            source = root / "library.py"
+            source.write_text(" " * 8100 + "fastapi argparse openai", encoding="utf-8")
+            profile = discover_project(root)
+            self.assertEqual(profile.project_kinds, ("unknown",))
+            self.assertEqual(profile.surfaces, ("artifact_surface",))
+            source.write_text("import fastapi, argparse, openai", encoding="utf-8")
+            profile = discover_project(root)
+            self.assertTrue({"api_surface", "command_surface", "integration_surface"} <= set(profile.surfaces))
+
     def test_discovery_is_project_adaptive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -472,7 +488,7 @@ class QaAuditTests(unittest.TestCase):
             provider = FakeQaProvider()
 
             with (
-                patch.dict(os.environ, {"STUB_API_KEY": "test-key"}),
+                patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
                 patch(
                     "deepmate.channels.cli.ChatCompletionsProvider",
                     lambda base_url, api_key: provider,
@@ -503,7 +519,7 @@ class QaAuditTests(unittest.TestCase):
             provider = FakeQaProvider(content="not json")
 
             with (
-                patch.dict(os.environ, {"STUB_API_KEY": "test-key"}),
+                patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
                 patch(
                     "deepmate.channels.cli.ChatCompletionsProvider",
                     lambda base_url, api_key: provider,

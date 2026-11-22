@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +18,7 @@ from deepmate.evolution.evidence_mining import (
 )
 from deepmate.foundation import normalize_name, normal_datetime, utc_isoformat
 from deepmate.storage import JsonlWriter
+from deepmate.storage.jsonl import iter_jsonl_objects
 
 FAILURE_PATTERNS_FILE = "failure_patterns.jsonl"
 USER_CORRECTION_PATTERN = "user_correction"
@@ -112,18 +112,8 @@ class FailurePatternStore:
 
     def load(self) -> tuple[FailurePattern, ...]:
         """Load latest pattern state keyed by kind and signature."""
-        if not self.path.exists():
-            return ()
         latest: dict[str, FailurePattern] = {}
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(record, Mapping):
-                continue
+        for record in iter_jsonl_objects(self.path):
             pattern = FailurePattern.from_record(record)
             if pattern.is_ready():
                 latest[pattern.key()] = pattern

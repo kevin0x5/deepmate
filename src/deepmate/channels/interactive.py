@@ -421,7 +421,7 @@ def _task_maintenance_result(
             return (
                 runtime,
                 extra.continuation,
-                format_execute_outcome(extra.evaluation),
+                format_execute_outcome(extra.evaluation, include_contract=False),
             )
         return runtime, str(extra).strip(), ""
     return value, "", ""

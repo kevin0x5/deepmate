@@ -22,7 +22,7 @@ Use this Work Kit to turn scattered sources into a concise brief with evidence, 
    - risks and unknowns
 6. When comparison, evolution, or capability shape is central to the brief, load `tech-diagram`: use `comparison` for option matrices, `timeline` for evolution, and `architecture` for technical landscape structure.
 7. When the user asks for a shareable artifact, write Markdown first and call `render_html_report` to generate a polished HTML report.
-8. Before final delivery, call `review_artifact` on the Markdown source with `require_sources=true` and `require_summary=true`. If HTML was rendered, also review the HTML with `require_sources=true`.
+8. For a chat brief, verify the cited evidence in the reply. For a saved brief, call `review_artifact` on the Markdown source with `require_sources=true` and `require_summary=true`. If HTML was rendered, also review the HTML with `require_sources=true`.
 9. Fix actionable review findings once before final delivery. Do not ask the user to inspect routine missing-source, placeholder, caption, or heading warnings.
 
 ## Output Bar
@@ -57,4 +57,4 @@ Use a Markdown source with this structure:
 ## Sources
 ```
 
-Then call `render_html_report` with `theme="prussian"` for technical/product work or `theme="forest"` for market/industry briefs.
+For a requested HTML report, call `render_html_report` with `theme="prussian"` for technical/product work or `theme="forest"` for market/industry briefs.

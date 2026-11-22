@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import json
+import math
 import re
 from collections.abc import Callable, Mapping
 from contextlib import closing
@@ -15,6 +16,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from deepmate.domain import MessageRole
 from deepmate.providers.messages import (
     AuthError,
     ModelConversationItem,
@@ -110,17 +112,44 @@ class ChatCompletionsProvider:
         return accumulator.finalize()
 
 
+def prepare_assistant_text_replay(
+    conversation: tuple[ModelConversationItem, ...],
+    *,
+    has_tools: bool,
+    capabilities: ModelCapabilities,
+    options: Mapping[str, object],
+) -> tuple[ModelConversationItem, ...]:
+    """Keep reasoning from ordinary replies for thinking requests that carry tools."""
+    thinking = options.get("thinking")
+    if (
+        has_tools
+        and capabilities.supports_tools
+        and capabilities.supports_thinking
+        and capabilities.supports_assistant_reasoning_replay
+        and not (isinstance(thinking, Mapping) and thinking.get("type") == "disabled")
+    ):
+        return conversation
+    return tuple(
+        replace(item, assistant_reasoning="") if item.assistant_reasoning else item
+        for item in conversation
+    )
+
+
 def sanitize_model_request(request: ModelRequest) -> ModelRequest:
     """Return a provider-boundary-safe request without mutating transcript state."""
     capabilities = request.capabilities.normalized()
+    conversation = prepare_assistant_text_replay(
+        request.conversation,
+        has_tools=bool(request.tool_schemas),
+        capabilities=capabilities,
+        options=request.options,
+    )
     if not capabilities.sanitize_request:
-        return replace(request, capabilities=capabilities)
-
+        return replace(request, conversation=conversation, capabilities=capabilities)
     conversation = tuple(
         item
         for item in (
-            _sanitize_conversation_item(item, capabilities)
-            for item in request.conversation
+            _sanitize_conversation_item(item, capabilities) for item in conversation
         )
         if item is not None
     )
@@ -209,17 +238,16 @@ def _conversation_item_messages(
     supports_image_input: bool = True,
 ) -> list[Mapping[str, object]]:
     if item.message is not None:
-        return [_message_payload(item.message)]
+        message = {"role": item.message.role.value, "content": item.message.content}
+        if item.message.role == MessageRole.ASSISTANT and item.assistant_reasoning:
+            message["reasoning_content"] = item.assistant_reasoning
+        return [message]
     if item.tool_exchange is not None:
         return _tool_exchange_messages(
             item.tool_exchange,
             supports_image_input=supports_image_input,
         )
     raise ValueError("conversation item requires message or tool exchange")
-
-
-def _message_payload(message: Message) -> Mapping[str, object]:
-    return {"role": message.role.value, "content": message.content}
 
 
 def _tool_exchange_messages(
@@ -888,24 +916,39 @@ def _parse_usage(value: object) -> TokenUsage | None:
         return None
     details = value.get("completion_tokens_details")
     detail_map = details if isinstance(details, Mapping) else {}
+    prompt = _token_count(value, "prompt_tokens")
+    output = _token_count(value, "completion_tokens")
+    hit = _token_count(value, "prompt_cache_hit_tokens")
+    miss = _token_count(value, "prompt_cache_miss_tokens")
+    prompt_details = value.get("prompt_tokens_details")
+    if hit is None and isinstance(prompt_details, Mapping):
+        hit = _token_count(prompt_details, "cached_tokens")
+    if prompt is None and output is None and hit is None and miss is None:
+        return None
+    if prompt is not None:
+        if hit is not None and miss is None:
+            miss = max(0, prompt - hit)
+        elif miss is not None and hit is None:
+            hit = max(0, prompt - miss)
     return TokenUsage(
-        input_tokens=_int_field(value, "prompt_tokens"),
-        output_tokens=_int_field(value, "completion_tokens"),
-        cache_hit_input_tokens=_int_field(value, "prompt_cache_hit_tokens"),
-        cache_miss_input_tokens=_int_field(value, "prompt_cache_miss_tokens"),
-        reasoning_tokens=_int_field(detail_map, "reasoning_tokens"),
+        input_tokens=prompt or 0,
+        output_tokens=output or 0,
+        cache_hit_input_tokens=hit or 0,
+        cache_miss_input_tokens=miss or 0,
+        reasoning_tokens=_token_count(detail_map, "reasoning_tokens") or 0,
+        totals_reported=prompt is not None and output is not None,
     )
 
 
-def _int_field(mapping: Mapping[str, object], key: str) -> int:
+def _token_count(mapping: Mapping[str, object], key: str) -> int | None:
     value = mapping.get(key)
     if isinstance(value, bool):
-        return 0
+        return None
     if isinstance(value, int):
-        return value
-    if isinstance(value, float):
+        return value if value >= 0 else None
+    if isinstance(value, float) and math.isfinite(value) and value >= 0:
         return int(value)
-    return 0
+    return None
 
 
 def _empty_object_schema() -> Mapping[str, object]:

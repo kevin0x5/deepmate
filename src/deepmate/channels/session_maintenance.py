@@ -22,6 +22,7 @@ from deepmate.memory.manager import (
     MemoryPatchOperation,
     apply_memory_patch,
 )
+from deepmate.providers.usage import reported_cache_hit_ratio
 from deepmate.providers import (
     ChatCompletionsProvider,
     ModelConversationItem,
@@ -931,10 +932,7 @@ def _summary_usage_refs(usage) -> tuple[str, ...]:
 def _cache_hit_ratio(usage) -> float | None:
     if usage is None:
         return None
-    total = usage.cache_hit_input_tokens + usage.cache_miss_input_tokens
-    if total <= 0:
-        return None
-    return usage.cache_hit_input_tokens / total
+    return reported_cache_hit_ratio(usage.cache_hit_input_tokens, usage.cache_miss_input_tokens)
 
 
 def _apply_memory_patch_after_checkpoint(

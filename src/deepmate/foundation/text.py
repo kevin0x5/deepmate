@@ -3,6 +3,17 @@
 from __future__ import annotations
 
 
+def _ascii_token_weight(char: str) -> int:
+    if char.isspace():
+        return 1
+    if char.isalnum() or char == "_":
+        return 3
+    return 5
+
+
+_ASCII_WEIGHTS = bytes(_ascii_token_weight(chr(i)) for i in range(128)) + bytes(128)
+
+
 def normalize_name(name: str) -> str:
     """Return a stable case-insensitive display-name key."""
     return " ".join(name.strip().lower().split())
@@ -13,7 +24,9 @@ def compact_text(value: str, limit: int) -> str:
     text = " ".join(value.split())
     if len(text) <= limit:
         return text
-    return text[: max(0, limit - 3)].rstrip() + "..."
+    if limit <= 3:
+        return "." * max(0, limit)
+    return text[: limit - 3].rstrip() + "..."
 
 
 def non_negative_int(value: object) -> int:
@@ -36,18 +49,17 @@ def estimate_text_tokens(text: str) -> int:
     cleaned = text.strip()
     if not cleaned:
         return 0
+    if cleaned.isascii():
+        return (sum(cleaned.encode("ascii").translate(_ASCII_WEIGHTS)) + 9) // 10
     token_tenths = 0
     for char in cleaned:
-        if char.isspace():
-            token_tenths += 1
-            continue
         codepoint = ord(char)
-        if _is_cjk_codepoint(codepoint):
+        if codepoint < 128:
+            token_tenths += _ASCII_WEIGHTS[codepoint]
+        elif char.isspace():
+            token_tenths += 1
+        elif _is_cjk_codepoint(codepoint):
             token_tenths += 6
-        elif char.isascii() and (char.isalnum() or char == "_"):
-            token_tenths += 3
-        elif char.isascii():
-            token_tenths += 5
         else:
             token_tenths += 8
     estimated = (token_tenths + 9) // 10

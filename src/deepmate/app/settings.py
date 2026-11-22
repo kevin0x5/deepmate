@@ -14,6 +14,7 @@ from deepmate.providers.messages import ModelCapabilities
 
 DEFAULT_MODEL_CONTEXT_TOKENS = 1_000_000
 DEEPSEEK_PROVIDER_NAME = "deepseek"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-flash"
 LOCAL_PROVIDER_NAME = "local"
 DEFAULT_HISTORY_TOKEN_BUDGET_RATIO = 0.75
 DEFAULT_HOT_PROFILE_BUDGET_RATIO = 0.005
@@ -41,7 +42,7 @@ DEFAULT_TOOL_OUTPUT_COMPACT_TARGET_RATIO = 0.003
 DEFAULT_LOOP_GUARD_HARD_STEP_CAP = 100
 FALLBACK_RESERVED_CONTEXT_RATIO = 0.15
 DEEPMATE_HOME_ENV = "DEEPMATE_HOME"
-DEFAULT_CONFIG_TEXT = """runtime:
+DEFAULT_CONFIG_TEXT = f"""runtime:
   data_dir: var
   active_profile: default
   tool_repair:
@@ -74,10 +75,10 @@ observability:
 remote:
   wecom:
     enabled: false
-    bot_id: ${DEEPMATE_WECOM_BOT_ID}
-    secret: ${DEEPMATE_WECOM_SECRET}
-    allowed_users: ${DEEPMATE_WECOM_ALLOWED_USERS}
-    group_policy: ${DEEPMATE_WECOM_GROUP_POLICY}
+    bot_id: ${{DEEPMATE_WECOM_BOT_ID}}
+    secret: ${{DEEPMATE_WECOM_SECRET}}
+    allowed_users: ${{DEEPMATE_WECOM_ALLOWED_USERS}}
+    group_policy: ${{DEEPMATE_WECOM_GROUP_POLICY}}
 
 provider:
   default: deepseek
@@ -94,25 +95,25 @@ subagents:
 
 models:
   memory:
-    model: deepseek-v4-flash
+    model: {DEFAULT_DEEPSEEK_MODEL}
     thinking: disabled
     temperature: 0
     max_tokens: 1200
   summary:
-    model: deepseek-v4-flash
+    model: {DEFAULT_DEEPSEEK_MODEL}
     thinking: disabled
     temperature: 0
     max_tokens: 5000
   subagent_worker:
-    model: deepseek-v4-flash
+    model: {DEFAULT_DEEPSEEK_MODEL}
     thinking: disabled
     temperature: 0
     max_tokens: 1200
 """
-DEFAULT_PROVIDERS_TEXT = """providers:
+DEFAULT_PROVIDERS_TEXT = f"""providers:
   deepseek:
     base_url: https://api.deepseek.com
-    model: deepseek-v4-flash
+    model: {DEFAULT_DEEPSEEK_MODEL}
     upgrade_model: deepseek-v4-pro
     context_window: 1000000
   local:
@@ -1157,8 +1158,8 @@ def _load_providers(values: dict[tuple[str, ...], str]) -> dict[str, ProviderSet
         providers[DEEPSEEK_PROVIDER_NAME] = ProviderSettings(
             name=DEEPSEEK_PROVIDER_NAME,
             base_url="https://api.deepseek.com",
-            default_model="deepseek-v4-flash",
-            model="deepseek-v4-flash",
+            default_model=DEFAULT_DEEPSEEK_MODEL,
+            model=DEFAULT_DEEPSEEK_MODEL,
             upgrade_model="deepseek-v4-pro",
             context_window=DEFAULT_MODEL_CONTEXT_TOKENS,
             capabilities=_default_provider_capabilities(DEEPSEEK_PROVIDER_NAME),
@@ -1188,7 +1189,7 @@ def _default_provider_base_url(name: str) -> str:
 def _default_provider_model(name: str) -> str:
     if name == LOCAL_PROVIDER_NAME:
         return "qwen3-local"
-    return "deepseek-v4-flash" if name == DEEPSEEK_PROVIDER_NAME else ""
+    return DEFAULT_DEEPSEEK_MODEL if name == DEEPSEEK_PROVIDER_NAME else ""
 
 
 def _load_provider_capabilities(
@@ -1254,7 +1255,7 @@ def _provider_uses_dedicated_model_purposes(
     if provider is None:
         return True
     provider_name = provider.name if isinstance(provider, ProviderSettings) else str(provider)
-    return provider_name in {DEEPSEEK_PROVIDER_NAME, LOCAL_PROVIDER_NAME}
+    return provider_name == DEEPSEEK_PROVIDER_NAME
 
 
 def _ensure_workspace_defaults(root: Path, deepmate_home: Path | None = None) -> None:
@@ -1276,9 +1277,8 @@ def _write_text_if_missing(path: Path, content: str) -> None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            text = content.rstrip() + "\n" if content.strip() else ""
-            path.write_text(text, encoding="utf-8")
+        with path.open("x", encoding="utf-8") as file:
+            file.write(content.rstrip() + "\n" if content.strip() else "")
     except OSError:
         return
 

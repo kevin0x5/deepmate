@@ -203,20 +203,19 @@ def select_conversation_window(
     normalized_policy = (policy or ConversationBudgetPolicy()).normalized()
     items = tuple(conversation)
     item_tokens = tuple(estimate_conversation_item_tokens(item) for item in items)
-    selected = _selected_items(items, item_tokens, normalized_policy)
     estimated_tokens = sum(item_tokens)
-    selected_start = len(items) - len(selected)
-    selected_tokens = sum(item_tokens[selected_start:])
     budget_suffix = _budget_suffix(items, item_tokens, normalized_policy)
-    would_drop_count = max(0, len(items) - len(budget_suffix))
+    would_drop_count = len(items) - len(budget_suffix)
     should_trim = normalized_policy.history_window_mode == TRIM_HISTORY_WINDOW_MODE
-    output_items = selected if should_trim else items
+    output_items = budget_suffix if should_trim else items
     dropped_count = len(items) - len(output_items)
     report = ConversationBudgetReport(
         conversation_items=len(items),
         selected_conversation_items=len(output_items),
         estimated_history_tokens=estimated_tokens,
-        selected_history_tokens=selected_tokens if should_trim else estimated_tokens,
+        selected_history_tokens=(
+            estimated_tokens - sum(item_tokens[:dropped_count]) if dropped_count else estimated_tokens
+        ),
         history_token_budget=normalized_policy.history_token_budget,
         protect_recent_items=normalized_policy.protect_recent_items,
         history_window_mode=normalized_policy.history_window_mode,
@@ -234,7 +233,10 @@ def select_conversation_window(
 def estimate_conversation_item_tokens(item: ModelConversationItem) -> int:
     """Return a rough token estimate for one conversation item."""
     if item.message is not None:
-        return MESSAGE_OVERHEAD_TOKENS + estimate_text_tokens(item.message.content)
+        tokens = MESSAGE_OVERHEAD_TOKENS + estimate_text_tokens(item.message.content)
+        if item.message.role == MessageRole.ASSISTANT:
+            tokens += estimate_text_tokens(item.assistant_reasoning)
+        return tokens
     if item.tool_exchange is not None:
         return MESSAGE_OVERHEAD_TOKENS + _estimate_tool_exchange_tokens(
             item.tool_exchange
@@ -278,16 +280,6 @@ def _effective_context_reserves(
     response = int(target_total * (response_token_reserve / total))
     safety = target_total - response
     return response, safety
-
-
-def _selected_items(
-    items: tuple[ModelConversationItem, ...],
-    item_tokens: tuple[int, ...],
-    policy: ConversationBudgetPolicy,
-) -> tuple[ModelConversationItem, ...]:
-    if policy.history_window_mode != TRIM_HISTORY_WINDOW_MODE:
-        return items
-    return _budget_suffix(items, item_tokens, policy)
 
 
 def _budget_suffix(

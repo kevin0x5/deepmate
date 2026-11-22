@@ -23,4 +23,8 @@ class Message:
 
     def is_ready(self) -> bool:
         """Return whether the message has content worth sending or storing."""
-        return bool(self.content.strip())
+        return (
+            isinstance(self.role, MessageRole)
+            and isinstance(self.content, str)
+            and bool(self.content.strip())
+        )

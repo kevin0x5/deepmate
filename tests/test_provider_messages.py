@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 
+from deepmate.domain import Message, MessageRole
 from deepmate.providers import (
+    ModelConversationItem,
     ModelResponse,
     ModelToolExchange,
     ModelToolRequest,
@@ -11,6 +13,10 @@ from deepmate.providers import (
 
 
 class ProviderMessagesTest(unittest.TestCase):
+    def test_invalid_domain_message_is_rejected_before_serialization(self) -> None:
+        for message in (Message(MessageRole.USER, None), Message(None, "hello")):
+            self.assertFalse(ModelConversationItem.from_message(message).is_ready())
+
     def test_tool_request_ready_handles_non_string_name(self) -> None:
         request = ModelToolRequest(name=None)  # type: ignore[arg-type]
 

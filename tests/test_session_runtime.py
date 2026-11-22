@@ -21,6 +21,7 @@ from deepmate.runtime import (
     start_session_runtime,
 )
 from deepmate.skills import SkillDocument
+from deepmate.storage import TranscriptStore
 from deepmate.subagents import (
     SubagentRuntime,
     SubagentToolExecutor,
@@ -67,6 +68,43 @@ class StreamingStubProvider:
 
 
 class SessionRuntimeTests(unittest.TestCase):
+    def test_resumed_tool_turn_replays_reasoning_from_a_plain_assistant_reply(self):
+        with _workspace() as workspace:
+            activation = start_runtime_activation(
+                session_id="flash",
+                workspace=workspace,
+                profile=ProfileRef(name="default", uri="profiles/default"),
+            )
+            transcript = TranscriptStore(workspace / "turns.jsonl", "flash")
+            provider = StubProvider([
+                ModelResponse(content="Found the link.", reasoning="Checked the source heading."),
+                ModelResponse(content="Verified."),
+            ])
+            runtime = start_session_runtime(activation)
+            runtime.run_user_turn(
+                provider=provider,
+                model="deepseek-flash",
+                messages=(Message(MessageRole.USER, "Locate the link."),),
+                history_sink=transcript.append_item,
+            )
+            history = transcript.load_items()
+            self.assertEqual(history[-1].message.content, "Found the link.")
+            runtime.with_conversation(history).run_user_turn(
+                provider=provider,
+                model="deepseek-flash",
+                messages=(Message(MessageRole.USER, "Verify it."),),
+                tool_schemas=({
+                    "name": "read_label",
+                    "description": "Read a sample label.",
+                    "input_schema": {"type": "object"},
+                },),
+            )
+            replayed = next(
+                item for item in provider.requests[-1].conversation
+                if item.message and item.message.role == MessageRole.ASSISTANT
+            )
+            self.assertEqual(replayed.assistant_reasoning, "Checked the source heading.")
+
     def test_activation_snapshot_stays_frozen_without_refresh_request(self) -> None:
         with _workspace() as workspace:
             profile = ProfileRef(name="default", uri="profiles/default")

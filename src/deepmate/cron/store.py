@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-import os
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from deepmate.cron.model import CronJob, job_path
-from deepmate.storage.atomic import file_lock
+from deepmate.storage.atomic import atomic_write_text, file_lock
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,8 +45,10 @@ class CronJobStore:
 
     def ensure(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            self.path.write_text("", encoding="utf-8")
+        try:
+            self.path.touch(exist_ok=False)
+        except FileExistsError:
+            pass
 
     def load(self) -> tuple[CronJob, ...]:
         if not self.path.exists():
@@ -136,24 +139,37 @@ class CronJobStore:
         return tuple(lines)
 
     def get(self, job_id: str) -> CronJob:
-        clean = job_id.strip()
-        for job in self.load():
-            if job.id == clean:
-                return job
-        raise ValueError(f"cron job not found: {clean}")
+        job = self.find(job_id)
+        if job is None:
+            raise ValueError(f"cron job not found: {job_id.strip()}")
+        return job
 
-    def save(self, job: CronJob) -> None:
+    def find(self, job_id: str) -> CronJob | None:
+        clean = job_id.strip()
+        return next((job for job in self.load() if job.id == clean), None)
+
+    def run_lock(self, job_id: str) -> AbstractContextManager[None]:
+        # Job IDs also come from the user-editable JSONL file.
+        key = hashlib.sha256(job_id.strip().encode("utf-8")).hexdigest()
+        return file_lock(self.path.parent / f"run-{key}")
+
+    def save(self, job: CronJob, *, expected: CronJob | None = None) -> None:
+        """Save a job, optionally only if the version used by a runner still exists."""
         with file_lock(self.path):
             lines = list(self._read_lines_unlocked())
             replaced = False
             output_lines: list[str] = []
             for line in lines:
                 if line.job is not None and line.job.id == job.id and not replaced:
+                    if expected is not None and line.job != expected:
+                        return
                     output_lines.append(_job_line(job))
                     replaced = True
                     continue
                 output_lines.append(line.raw)
             if not replaced:
+                if expected is not None:
+                    return
                 output_lines.append(_job_line(job))
             self._write_lines_unlocked(output_lines)
 
@@ -177,10 +193,7 @@ class CronJobStore:
         content = "\n".join(lines)
         if content:
             content += "\n"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(f"{self.path.suffix}.tmp")
-        tmp.write_text(content, encoding="utf-8")
-        os.replace(tmp, self.path)
+        atomic_write_text(self.path, content)
 
 
 def _job_line(job: CronJob) -> str:

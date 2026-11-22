@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import json
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
 from deepmate.storage import JsonlWriter
+from deepmate.storage.jsonl import iter_jsonl_objects
 
 from .types import HookEnvelope, utc_now_iso
 
@@ -180,22 +181,16 @@ class HookSignalStore:
 
     def load_recent(self, limit: int = MAX_RECENT_SIGNALS) -> tuple[HookSignalRecord, ...]:
         """Load recent well-formed records from the signal file."""
-        if not self.path.exists():
-            return ()
         max_count = max(1, int(limit))
-        records: list[HookSignalRecord] = []
-        with self.path.open("r", encoding="utf-8") as file:
-            for line in file:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = HookSignalRecord.from_record(json.loads(line))
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    continue
-                if record.is_ready():
-                    records.append(record)
-        return tuple(records[-max_count:])
+        records: deque[HookSignalRecord] = deque(maxlen=max_count)
+        for raw in iter_jsonl_objects(self.path):
+            try:
+                record = HookSignalRecord.from_record(raw)
+            except (TypeError, ValueError):
+                continue
+            if record.is_ready():
+                records.append(record)
+        return tuple(records)
 
 
 def _bounded_refs(value: object) -> tuple[str, ...]:

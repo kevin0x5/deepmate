@@ -174,7 +174,7 @@ def _run(args: argparse.Namespace) -> int:
         provider_factory=provider_factory,
         environment_metadata=_provider_metadata(args.provider),
     )
-    _print_run(run)
+    _print_run(run, Path(args.output_root))
     if not run.valid:
         return EXIT_INVALID
     return EXIT_PASS if run.passed else EXIT_FAILURE
@@ -398,9 +398,9 @@ def _pricing() -> dict[str, object]:
         raise EvalConfigurationError("pricing values must be numeric") from exc
 
 
-def _print_run(run) -> None:
+def _print_run(run, output_root: Path) -> None:
     print(f"run: {run.manifest.run_id}")
-    print(f"output: {run.output_dir}")
+    print(f"output: {output_root / run.manifest.run_id}")
     print(f"valid: {str(run.valid).lower()}")
     print(f"passed: {str(run.passed).lower()}")
     print(f"safety_gate: {str(run.safety_gate).lower()}")

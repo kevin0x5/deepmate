@@ -21,17 +21,18 @@ def check_url(url: str, *, timeout_seconds: float = 2.0) -> HealthCheck:
     clean = url.strip()
     if not clean:
         return HealthCheck(False, message="URL is empty")
-    request = urllib.request.Request(
-        clean,
-        headers={"User-Agent": "deepmate-preview-check/1.0"},
-    )
     try:
+        request = urllib.request.Request(
+            clean,
+            headers={"User-Agent": "deepmate-preview-check/1.0"},
+        )
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             status = int(getattr(response, "status", 0) or 0)
             if 200 <= status < 400:
                 return HealthCheck(True, status_code=status, message="ok")
             return HealthCheck(False, status_code=status, message=f"HTTP {status}")
     except urllib.error.HTTPError as exc:
-        return HealthCheck(False, status_code=exc.code, message=f"HTTP {exc.code}")
-    except (OSError, urllib.error.URLError, TimeoutError) as exc:
+        with exc:
+            return HealthCheck(False, status_code=exc.code, message=f"HTTP {exc.code}")
+    except (OSError, ValueError) as exc:
         return HealthCheck(False, message=str(exc))

@@ -44,6 +44,19 @@ class TuiRuntimeStats:
             self._update_from_message(clean)
         return view
 
+    def reset_model_usage(self, context_tokens: int | None) -> None:
+        """Drop estimates and usage measured against the previous model."""
+        with self._lock:
+            self.model_context_tokens = context_tokens
+            self.input_pressure = None
+            self.estimated_input_tokens = None
+            self.context_remaining_input_tokens = None
+            self.actual_input_tokens = None
+            self.output_tokens = None
+            self.cache_hit_ratio = None
+            self.tool_schema_tokens = None
+            self.tool_output_ratio = None
+
     def footer_summary(self) -> str:
         """Return a compact footer summary."""
         with self._lock:
@@ -175,7 +188,7 @@ class TuiRuntimeStats:
             self.cache_hit_ratio = _float_value(
                 values,
                 "cache_hit_ratio",
-                self.cache_hit_ratio,
+                None if "cache" in values or values.get("usage") == "unreported" else self.cache_hit_ratio,
             )
             self.tool_schema_tokens = _int_value(
                 values,

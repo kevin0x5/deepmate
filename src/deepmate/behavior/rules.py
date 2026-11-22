@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
+
+from deepmate.storage.atomic import atomic_write_json, file_lock
+from deepmate.storage.jsonl import iter_jsonl_objects
 
 DEFAULT_RULE_BUDGET_CHARS = 1_500
 MIN_RULE_CONFIDENCE = 0.55
@@ -65,20 +67,22 @@ class BehaviorSettingsStore:
             "computer_learning_enabled": settings.computer_learning_enabled,
             "evidence_enabled": settings.evidence_enabled,
         }
-        _atomic_write_json(self.path, payload)
+        atomic_write_json(self.path, payload)
 
     def set_interaction_learning(self, enabled: bool) -> BehaviorSettings:
-        settings = replace(
-            self.load(),
-            interaction_learning_enabled=enabled,
-            evidence_enabled=enabled,
-        )
-        self.save(settings)
+        with file_lock(self.path):
+            settings = replace(
+                self.load(),
+                interaction_learning_enabled=enabled,
+                evidence_enabled=enabled,
+            )
+            self.save(settings)
         return settings
 
     def set_computer_learning(self, enabled: bool) -> BehaviorSettings:
-        settings = replace(self.load(), computer_learning_enabled=enabled)
-        self.save(settings)
+        with file_lock(self.path):
+            settings = replace(self.load(), computer_learning_enabled=enabled)
+            self.save(settings)
         return settings
 
 
@@ -271,20 +275,9 @@ class BehaviorRuleStore:
 
     def _iter_records(self) -> Iterable[Mapping[str, object]]:
         try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
+            yield from iter_jsonl_objects(self.path)
         except OSError:
-            return ()
-        records: list[Mapping[str, object]] = []
-        for line in lines:
-            if not line.strip():
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, Mapping):
-                records.append(payload)
-        return tuple(records)
+            return
 
     def _append_json(self, payload: Mapping[str, object]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -610,13 +603,3 @@ def _timestamp() -> str:
 def _safe_name(value: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
     return clean or "default"
-
-
-def _atomic_write_json(path: Path, payload: Mapping[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(tmp_path, path)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from deepmate.cron.model import CronSchedule
@@ -49,7 +49,8 @@ def next_run_at(schedule: CronSchedule, *, now: datetime | None = None) -> str:
     kind = schedule.kind.strip().lower()
     if kind == "interval":
         minutes = max(1, schedule.interval_minutes)
-        return (current + timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+        next_instant = current.astimezone(UTC) + timedelta(minutes=minutes)
+        return next_instant.astimezone(tz).replace(microsecond=0).isoformat()
     hour, minute = parse_time(schedule.time or "09:00")
     candidate = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if kind == "weekly":
