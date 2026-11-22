@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from typing import TextIO
 
 SKILL_FILE_NAME = "SKILL.md"
 FRONTMATTER_BOUNDARY = "---"
@@ -21,22 +22,28 @@ def resolve_skill_file(path: str | Path) -> Path:
 
 def read_skill_frontmatter(path: str | Path) -> Mapping[str, object]:
     """Read only SKILL.md frontmatter metadata."""
-    metadata, _ = read_skill_markdown(path)
-    return metadata
+    skill_path = resolve_skill_file(path)
+    with skill_path.open(encoding="utf-8") as file:
+        return _read_frontmatter(file, skill_path)
 
 
 def read_skill_markdown(path: str | Path) -> tuple[Mapping[str, object], str]:
     """Read SKILL.md frontmatter metadata and markdown body."""
     skill_path = resolve_skill_file(path)
-    lines = skill_path.read_text(encoding="utf-8").splitlines()
-    if not lines or lines[0].strip() != FRONTMATTER_BOUNDARY:
-        return {}, "\n".join(lines).strip()
+    with skill_path.open(encoding="utf-8") as file:
+        metadata = _read_frontmatter(file, skill_path)
+        return metadata, "\n".join(file.read().splitlines()).strip()
 
-    for index, line in enumerate(lines[1:], start=1):
+
+def _read_frontmatter(file: TextIO, skill_path: Path) -> Mapping[str, object]:
+    if file.readline().strip() != FRONTMATTER_BOUNDARY:
+        file.seek(0)
+        return {}
+    lines = []
+    for line in file:
         if line.strip() == FRONTMATTER_BOUNDARY:
-            metadata = _parse_frontmatter_lines(lines[1:index])
-            body = "\n".join(lines[index + 1 :]).strip()
-            return metadata, body
+            return _parse_frontmatter_lines(lines)
+        lines.append(line.rstrip("\n"))
     raise ValueError(f"{skill_path} frontmatter is missing closing ---")
 
 

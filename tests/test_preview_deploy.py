@@ -16,6 +16,8 @@ from deepmate.preview_deploy import PreviewDeployStore, handle_deploy_command
 from deepmate.preview_deploy.health import HealthCheck
 from deepmate.preview_deploy.state import PreviewDeployState
 from deepmate.preview_deploy.supervisor import (
+    _PreviewServer,
+    _QuietStaticHandler,
     _preview_filesystem_path_allowed,
     _preview_path_allowed,
 )
@@ -108,6 +110,13 @@ class _ProcessTunnelProvider(_FakeTunnelProvider):
 
 
 class PreviewDeployTests(unittest.TestCase):
+    @_REQUIRES_LOCAL_SOCKET
+    def test_static_server_bind_is_independent_of_hostname_resolution(self) -> None:
+        with patch("socket.getfqdn", side_effect=AssertionError("unexpected reverse DNS")):
+            with _PreviewServer(("127.0.0.1", 0), _QuietStaticHandler) as server:
+                self.assertEqual(server.server_name, "127.0.0.1")
+                self.assertGreater(server.server_port, 0)
+
     def test_static_file_preview_allows_only_selected_html(self) -> None:
         self.assertTrue(
             _preview_path_allowed(

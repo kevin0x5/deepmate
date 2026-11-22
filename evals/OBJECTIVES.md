@@ -53,7 +53,9 @@ Security 和隐藏 Python Verifier。Fact Probe 对 `expected_facts` 做确定�
 核心结果包括：
 
 - `Reliable Task Horizon`：连续全部通过的最高任务级别；L0-L4 由 Case 标签定义。
-- `Cost per Reliable Success`：有完整 Provider/Pricing Provenance 时，总成本除以成功 Trial 数。
+- `Cost per Reliable Success` 以总成本除以成功 Trial 数。每一步都需要 Provider 用量和可追溯的价格。仅明确命中的输入按缓存价计算，其余已计量输入按普通输入价计算。
+- `cache_hit_ratio` 的分母为已报告的命中与未命中之和。缺少缓存明细的请求仍计入输入成本。
+- `tool_schema_tokens` 累加每一步实际组装请求的 schema 估算。汇总 `process_peak_memory_kib` 取观测到的最高进程峰值。
 - `Evolution Net Gain`：仅在真实 Pre/Post/Held-out 配对测量且 Safety Gate 通过时计算。
 - `pass@1`：每个 Case 第一次 Trial 的成功率。
 - `pass^3` / `pass^5`：每个 Case 前 3/5 次 Trial 全部成功的比例，用于观察连续可靠性。

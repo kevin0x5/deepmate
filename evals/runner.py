@@ -288,7 +288,10 @@ def run_case_trial(
         case,
         runtime_result,
         elapsed_seconds=elapsed,
-        schema_tokens=max(1, len(json.dumps(schemas, sort_keys=True)) // 4),
+        schema_tokens=sum(
+            step.request_budget_report.estimated_tool_schema_tokens
+            for step in runtime_result.steps if step.request_budget_report is not None
+        ),
         pricing=pricing,
     )
     return EvalCaseResult(

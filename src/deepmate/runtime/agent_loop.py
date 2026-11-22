@@ -52,7 +52,11 @@ from deepmate.runtime.diagnostics import (
     post_edit_diagnostics,
 )
 from deepmate.runtime.model_request import build_model_request
-from deepmate.providers.chat_completions import sanitize_model_request
+from deepmate.providers.chat_completions import (
+    prepare_assistant_text_replay,
+    sanitize_model_request,
+)
+from deepmate.providers.usage import reported_cache_hit_ratio
 from deepmate.runtime.prefix_cache import PrefixFingerprint, model_request_prefix_fingerprint
 from deepmate.runtime.loop_guard import (
     DEFAULT_HARD_STEP_CAP,
@@ -251,7 +255,13 @@ def run_agent_step(
     activation_refs = _activation_refs(activation)
     events: list[RuntimeEvent] = []
     errors: list[ErrorInfo] = []
-    input_conversation = tuple(conversation)
+    tool_schemas = tuple(tool_schemas)
+    input_conversation = prepare_assistant_text_replay(
+        tuple(conversation),
+        has_tools=bool(tool_schemas),
+        capabilities=model_capabilities or ModelCapabilities(),
+        options=options or {},
+    )
     window_selection = select_conversation_window(
         input_conversation,
         policy=conversation_budget_policy,
@@ -1588,7 +1598,12 @@ def _run_user_turn_inner(
                     history,
                     history_sink,
                     ModelConversationItem.from_message(
-                        Message(role=MessageRole.ASSISTANT, content=assistant_text)
+                        Message(role=MessageRole.ASSISTANT, content=assistant_text),
+                        assistant_reasoning=(
+                            step.response.reasoning
+                            if step.request.capabilities.supports_assistant_reasoning_replay
+                            else ""
+                        ),
                     )
                 )
             _record_turn_cost_cache_summary(
@@ -1939,15 +1954,12 @@ def _request_usage_refs(
     cache_hit_input_tokens = _usage_int(usage, "cache_hit_input_tokens")
     cache_miss_input_tokens = _usage_int(usage, "cache_miss_input_tokens")
     estimate_ratio = input_tokens / report.estimated_input_tokens
-    cache_total = cache_hit_input_tokens + cache_miss_input_tokens
-    cache_hit_ratio = (
-        cache_hit_input_tokens / cache_total if cache_total > 0 else 0.0
-    )
+    ratio = reported_cache_hit_ratio(cache_hit_input_tokens, cache_miss_input_tokens)
     return (
         f"estimated_prompt_tokens={report.estimated_input_tokens}",
         f"actual_prompt_tokens={input_tokens}",
         f"prompt_token_estimate_ratio={estimate_ratio:.4f}",
-        f"cache_hit_ratio={cache_hit_ratio:.4f}",
+        f"cache_hit_ratio={ratio:.4f}" if ratio is not None else "cache=unreported",
         f"tool_output_ratio={report.tool_output_ratio:.4f}",
     )
 
@@ -2632,16 +2644,13 @@ def _model_step_status(
         cache_hit_input_tokens = _usage_int(usage, "cache_hit_input_tokens")
         cache_miss_input_tokens = _usage_int(usage, "cache_miss_input_tokens")
         reasoning_tokens = _usage_int(usage, "reasoning_tokens")
-        cache_total = cache_hit_input_tokens + cache_miss_input_tokens
-        cache_ratio = (
-            cache_hit_input_tokens / cache_total if cache_total > 0 else 0.0
-        )
+        cache_ratio = reported_cache_hit_ratio(cache_hit_input_tokens, cache_miss_input_tokens)
         parts.extend(
             (
                 f"actual_input_tokens={input_tokens}",
                 f"output_tokens={output_tokens}",
                 f"cache_hit_tokens={cache_hit_input_tokens}",
-                f"cache_hit_ratio={cache_ratio:.3f}",
+                f"cache_hit_ratio={cache_ratio:.3f}" if cache_ratio is not None else "cache=unreported",
             )
         )
         if reasoning_tokens:

@@ -1,24 +1,28 @@
 <p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="#install"><img src="https://img.shields.io/badge/python-3.11%2B-green.svg" alt="Python 3.11+"></a>
-  <a href="https://api-docs.deepseek.com"><img src="https://img.shields.io/badge/DeepSeek%20V4-optimized-5865F2.svg" alt="DeepSeek V4"></a>
+  <a href="https://api-docs.deepseek.com/quick_start/pricing/"><img src="https://img.shields.io/badge/DeepSeek-V4.1%20Flash-5865F2.svg" alt="DeepSeek V4.1 Flash"></a>
 </p>
 
 # Deepmate
 
-Deepmate is a cost-first local AI workbench for long-running project work, with Task Mode, context management, local model deployment, governed skills/MCP/tools, and DeepSeek V4-specific optimizations.
+Deepmate is a local AI workbench for long-running project work. Its terminal UI puts your files beside the conversation. Task Mode follows a plan, checks its work, and records the decisions made along the way. Run it with DeepSeek or a local model through Ollama.
 
 ## Highlights
 
-- **Prefix cache** — Freeze consistent context snapshots and reuse content-generation-stable prefixes, reducing repeated project-background cost across long sessions.
-- **Cost governance** — Keep skills and capabilities hot/cold, bound and validate paginated MCP schemas, compact large outputs, and retrieve detail only when needed.
-- **Local model deployment** — Preflight disk space, resume or cancel Ollama downloads, deduplicate concurrent preparation, verify inference, and switch models from Deepmate.
-- **Self-evolution** — Mine scoped, confidence-filtered traces, sessions, activity notes, corrections, and successful workflows into auditable behavior hints, failure guards, generated skill drafts, and capability state.
+- **Prefix cache** — Keep project instructions and memory stable across turns so the provider can reuse the start of a request. The top-right corner of the terminal shows how much context is left. When space runs low, Deepmate can summarize older messages and keep recent ones in full.
+- **Cost governance** — Frequently used skills stay in the default list. The model can search MCP tools before loading their full definitions. If a test prints hundreds of lines, Deepmate keeps the full log on disk. The next turn gets a short preview and can look up the failing line.
+- **Local model deployment** — Check disk space, resume or cancel Ollama downloads, and test a model before switching. Concurrent requests for the same model share one download.
+- **Self-evolution** — Learn from repeated corrections and successful workflows. Deepmate can remember a preference, flag a recurring mistake, or turn a routine into a skill you can inspect and edit. The optional desktop pet shows task progress and lets you give feedback on its suggestions.
 
+  <div><a href="assets/readme/desktop-pets-wide.png"><img src="assets/readme/pets-row.svg" width="100%" height="101" alt="Deepmate desktop pets, from left to right: dog, cat, squirrel, and penguin"></a></div>
+- **Project history in Task Mode** — Open `task/plan.md` to see what’s done and what’s next. `task/evolution.md` keeps a running summary and a timeline of milestones, decisions from your discussions, and changes of direction. Task Mode saves a record of each checkpoint and completed task in `task/achievements/`.
+
+  ![The release-notes demo in Deepmate. The summary in task/evolution.md records the decision, and the timeline shows the verified link fix.](assets/readme/project-history.png)
 
 ## Install
 
-Requirements: Python 3.11+ and a DeepSeek API key.
+Deepmate requires Python 3.11 or later. Set a DeepSeek API key for the cloud model, or run `deepmate` and use `/local` with Ollama.
 
 ```bash
 pip install deepmate
@@ -33,7 +37,7 @@ tool permissions to the current workspace. For a one-shot CLI check:
 deepmate --cli "Summarize this project in one paragraph."
 ```
 
-For source development:
+To run the development build, install from a checkout.
 
 ```bash
 git clone https://github.com/kevin0x5/deepmate.git
@@ -95,7 +99,7 @@ You normally do not need to edit YAML before first use. Deepmate creates
 `config/deepmate.yaml`, `config/providers.yaml`, and local profile files with
 safe defaults when it first opens a workspace.
 
-The only required setup is a model key in the environment:
+For DeepSeek, set the model key in your shell.
 
 ```bash
 export DEEPSEEK_API_KEY="<your-deepseek-api-key>"
@@ -123,22 +127,37 @@ Most daily work happens inside the TUI:
 deepmate
 ```
 
+Press Enter to send and Shift+Enter or Ctrl+J to add a line. Type `/` to browse commands with the arrow keys and complete one with Tab. In terminals narrower than 100 columns, Ctrl+B opens the file list, Enter opens a file, and Esc returns to the conversation. Wider terminals can show files and chat side by side.
+
 Useful TUI commands:
 
 ```text
 /local                         Prepare and switch to an Ollama-backed local model.
+/local status                  Check the service, installed presets, download sizes, and last preparation result.
 /task plan <goal>              Create or update task/plan.md.
 /task execute                  Execute the current Task Mode plan.
+/task status                   See what passed, what is still open, or why the task stopped.
+/open task/evolution.md        Read the project summary and decision timeline.
 /task checkpoint <note>        Save a stage achievement under task/achievements/.
 /qa <goal>                     Create a QA Audit plan.
 /qa run                        Run approved QA checks.
 /cron add <schedule and job>   Create a recurring workspace job draft.
 /deploy ./dist                 Open a local/LAN/external preview.
 /pet setup                     Install or repair the desktop pet runtime.
+/pet select cat                Switch to the cat. Other choices are dog, squirrel, and penguin.
 /pet on                        Start the desktop pet window.
 /session tree                  Inspect session lineage.
+/session clone [title]         Copy the current discussion and continue in the copy.
+/session fork <turn_id> [title]  Start a branch from an earlier turn.
 /approvals                     Review approval history for the current session.
 ```
+
+<details>
+<summary>See how a release discussion branches into two conversations</summary>
+
+![The demo session tree branches from a release discussion into a sample customer email and a help center update.](assets/readme/workbench.png)
+
+</details>
 
 A direct single-HTML preview serves only that selected file. For pages with relative
 CSS, JavaScript, or image assets, preview a directory containing `index.html` instead.
@@ -209,14 +228,30 @@ deepmate --validate-runtime --thinking disabled
 
 ## DeepSeek V4 Compatibility
 
-- Model names: `deepseek-v4-flash` / `deepseek-v4-pro` (not deprecated V3 names)
+- By default, Deepmate requests `deepseek-flash`, which currently serves **DeepSeek-V4.1-Flash-1017**. Use `--upgrade-model` to select `deepseek-v4-pro`.
 - Context window: 1,000,000 tokens configured by default
 - Reasoning: `thinking` and `reasoning_effort: max` supported
 - No degraded-thinking workarounds recommended
 
-Refs: [API docs](https://api-docs.deepseek.com/) · [Thinking mode](https://api-docs.deepseek.com/guides/thinking_mode) · [Pricing](https://api-docs.deepseek.com/quick_start/pricing)
+[DeepSeek API docs](https://api-docs.deepseek.com/) · [Thinking mode](https://api-docs.deepseek.com/guides/thinking_mode) · [Pricing](https://api-docs.deepseek.com/quick_start/pricing)
 
 ## How It Works
+
+Use `/task plan` to define what counts as done, then `/task execute` to start work. After each pass, Deepmate compares the evidence with the acceptance criteria. If there’s work it can still do, it takes another pass. If it’s blocked or reaches its turn limit, it stops and records why.
+
+<picture>
+  <source media="(max-width: 600px)" srcset="assets/readme/agent-loop-compact.png">
+  <img src="assets/readme/agent-loop.png" width="788" alt="Task Mode plans, acts, verifies, and evaluates. It either takes another pass, saves the completed task, reports a blocker, or stops at the turn limit.">
+</picture>
+
+In a release-notes example, the first pass found a link pointing to a missing heading. Task Mode fixed it on the next pass and checked both links before marking the task complete. On a later turn, Task Mode loads the current plan, the running summary, and recent entries from the project history.
+
+<details>
+<summary>See Task Mode fix and verify a release-note link</summary>
+
+![Task Mode finds a broken link in the release-notes demo, fixes it on the next pass, and verifies both links.](assets/readme/task-loop.png)
+
+</details>
 
 ```text
 User surfaces
@@ -235,7 +270,9 @@ Optional integrations
 
 - API keys and remote secrets are read from environment variables or the private local
   secret store under `var/`; the desktop pet frontend does not inherit them.
-- Local runtime state is written under `var/` and ignored by Git.
+- This repository ignores the default runtime directory, `var/`. Session transcripts there
+  can include prompts, tool results, and model reasoning. When you use a cloud model,
+  it receives the context Deepmate assembles for each request.
 - Enterprise WeChat group conversations are session-isolated, inbound request IDs are
   deduplicated, and remote approvals can only be resolved by the requesting user.
 - Desktop-pet learning sends coarse interest tags rather than raw current-work summaries;

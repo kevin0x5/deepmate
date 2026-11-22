@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from deepmate.foundation import compact_text
+from deepmate.storage.atomic import atomic_write_text, file_lock
+
 
 @dataclass(frozen=True, slots=True)
 class ActivityEntry:
@@ -80,15 +83,19 @@ class ActivityStore:
         if not entry.is_ready():
             raise ValueError("activity entry is not ready")
         path = self.daily_path(entry.local_date())
-        path.parent.mkdir(parents=True, exist_ok=True)
-        existing = path.read_text(encoding="utf-8") if path.exists() else ""
-        with path.open("a", encoding="utf-8") as file:
-            if not existing.strip():
-                file.write(f"# Activity Note - {entry.local_date()}\n")
-            elif not existing.endswith("\n"):
-                file.write("\n")
-            file.write("\n")
-            file.write(_render_entry(entry))
+        with file_lock(path), path.open("a+b") as file:
+            file.seek(0)
+            # Existing notes start with a heading. Also accept user-edited,
+            # whitespace-only notes as empty, as older versions did.
+            first = file.read(1)
+            if first != b"#":
+                file.seek(0)
+            if first != b"#" and not any(line.decode("utf-8").strip() for line in file):
+                prefix = f"# Activity Note - {entry.local_date()}\n"
+            else:
+                file.seek(-1, 2)
+                prefix = "" if file.read(1) in {b"\n", b"\r"} else "\n"
+            file.write((prefix + "\n" + _render_entry(entry)).encode("utf-8"))
         return path
 
     def upsert_monthly_summary_entry(
@@ -103,8 +110,6 @@ class ActivityStore:
         date = _validated_date(local_date)
         month = date[:7]
         path = self.monthly_summary_path(month)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        existing = path.read_text(encoding="utf-8") if path.exists() else ""
         section = _render_monthly_summary_entry(
             local_date=date,
             summary=summary,
@@ -112,22 +117,21 @@ class ActivityStore:
             next_steps=next_steps,
             refs=refs,
         )
-        content = _upsert_markdown_section(
-            existing=existing,
-            title=f"# Activity Summary - {month}",
-            section_heading=f"## {date}",
-            section=section,
-        )
-        path.write_text(content, encoding="utf-8")
+        with file_lock(path):
+            existing = path.read_text(encoding="utf-8") if path.exists() else ""
+            content = _upsert_markdown_section(
+                existing=existing,
+                title=f"# Activity Summary - {month}",
+                section_heading=f"## {date}",
+                section=section,
+            )
+            atomic_write_text(path, content)
         return path
 
 
 def preview_activity_text(text: str, limit: int = 500) -> str:
     """Return a compact single-line preview for activity notes."""
-    value = " ".join(text.split())
-    if len(value) <= limit:
-        return value
-    return value[: limit - 3].rstrip() + "..."
+    return compact_text(text, limit)
 
 
 def _render_entry(entry: ActivityEntry) -> str:

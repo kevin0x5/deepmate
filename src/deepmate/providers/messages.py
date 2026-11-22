@@ -145,11 +145,14 @@ class ModelConversationItem:
 
     message: Message | None = None
     tool_exchange: ModelToolExchange | None = None
+    assistant_reasoning: str = ""
 
     @classmethod
-    def from_message(cls, message: Message) -> "ModelConversationItem":
+    def from_message(
+        cls, message: Message, *, assistant_reasoning: str = ""
+    ) -> "ModelConversationItem":
         """Build a conversation item from one text message."""
-        return cls(message=message)
+        return cls(message=message, assistant_reasoning=assistant_reasoning)
 
     @classmethod
     def from_tool_exchange(

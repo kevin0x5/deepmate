@@ -17,6 +17,7 @@ from deepmate.pet.copy import fallback_pet_copy, generate_pet_copy
 from deepmate.pet.electron_host import (
     electron_pet_command,
     electron_pet_missing_message,
+    packaged_pet_ui_dir,
     pet_runtime_ui_dir,
 )
 from deepmate.pet.events import (
@@ -53,6 +54,20 @@ class _CopyProvider:
 
 
 class PetCompanionTests(unittest.TestCase):
+    def test_partial_actions_and_feedback_are_consumed_after_the_write_finishes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PetStateStore.in_data_dir(tmp)
+            store.actions_path.parent.mkdir(parents=True)
+            for path, read in (
+                (store.actions_path, store.pending_actions),
+                (store.feedback_path, store.pending_feedback),
+            ):
+                path.write_bytes(b'{"action":"par')
+                self.assertEqual(read(), ())
+                with path.open("ab") as file:
+                    file.write(b'tial"}\n')
+                self.assertEqual([index for index, _ in read()], [1])
+
     def _pet_ui_root(self) -> Path:
         return Path(__file__).resolve().parents[1] / "src" / "deepmate" / "pet_ui"
 
@@ -346,10 +361,20 @@ class PetCompanionTests(unittest.TestCase):
         self.assertIn("ready(surface)", preload_js)
         self.assertIn("sendFeedback(value)", preload_js)
         self.assertIn('<canvas id="sprite"', pet_html)
-        self.assertIn("BASE_FRAMES", pet_js)
-        self.assertIn("FRAME_CACHE", pet_js)
-        self.assertIn("buildFrameCache()", pet_js)
-        self.assertIn("stateFrames", pet_js)
+        self.assertIn("onPortraits", preload_js)
+        portraits = json.loads((root / "renderer/portraits.json").read_text(encoding="utf-8"))
+        for pet_id in built_in_pet_ids():
+            pack = built_in_pet(pet_id)
+            portrait = portraits[pack.species]
+            self.assertEqual(len(portrait["rows"]), 64)
+            self.assertEqual({len(row) for row in portrait["rows"]}, {64})
+            self.assertTrue(set("".join(portrait["rows"])) <= pack.palette.keys())
+            for patch in portrait["closedEyes"]:
+                self.assertGreaterEqual(min(patch["x"], patch["y"]), 0)
+                self.assertLessEqual(patch["x"] + max(map(len, patch["rows"])), 64)
+                self.assertLessEqual(patch["y"] + len(patch["rows"]), 64)
+                self.assertTrue(set("".join(patch["rows"])) <= pack.palette.keys())
+            self.assertNotEqual(pack.frames["idle"][0], pack.frames["offline"][0])
         self.assertIn("image-rendering: pixelated", pet_css)
         self.assertIn("openCurrentWork()", pet_js)
         self.assertIn("background: transparent", pet_css)
@@ -368,14 +393,14 @@ class PetCompanionTests(unittest.TestCase):
             main_js,
         )
         self.assertIn("profile,", main_js)
-        self.assertIn("REACTIONS", pet_js)
-        self.assertIn("cleanReaction", pet_js)
+        self.assertIn("setReaction('poke')", pet_js)
+        self.assertIn(".reaction-poke .sprite", pet_css)
         self.assertIn("renderInlineMarkdown", bubble_js)
         self.assertIn("document.createElement('strong')", bubble_js)
         self.assertIn("max-height: 130px", bubble_css)
         self.assertIn("setTimedMuteHours(1)", main_js)
-        self.assertIn("Quiet 1h", main_js)
-        self.assertIn("Quiet 1h", hud_js)
+        self.assertIn("静音一小时", main_js)
+        self.assertIn("静音一小时", hud_js)
 
     def test_electron_pet_command_reports_missing_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -429,6 +454,11 @@ class PetCompanionTests(unittest.TestCase):
             main_js.parent.mkdir(parents=True)
             electron.write_text("#!/bin/sh\n", encoding="utf-8")
             main_js.write_text("console.log('pet')\n", encoding="utf-8")
+
+            with patch.dict("os.environ", {"DEEPMATE_PET_ELECTRON": ""}):
+                upgraded = electron_pet_command(data_dir)
+            self.assertEqual(upgraded[0], str(electron))
+            self.assertEqual(Path(upgraded[1]), packaged_pet_ui_dir() / "electron/main.js")
 
             with patch("deepmate.pet.electron_host.PET_UI_DIR", source_dir):
                 command = electron_pet_command(data_dir)

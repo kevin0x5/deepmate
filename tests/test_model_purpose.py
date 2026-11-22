@@ -267,6 +267,15 @@ class ModelPurposeTests(unittest.TestCase):
             self.assertEqual(settings.workspace, root.resolve())
             self.assertTrue((root / "config" / "deepmate.yaml").exists())
             self.assertTrue((root / "config" / "providers.yaml").exists())
+            provider = settings.provider()
+            self.assertEqual(provider.primary_model(), "deepseek-flash")
+            self.assertEqual(provider.upgrade_model, "deepseek-v4-pro")
+            self.assertEqual(settings.provider_context_tokens(provider), 1_000_000)
+            for purpose in ("memory", "summary", "subagent_worker"):
+                with self.subTest(purpose=purpose):
+                    config = resolve_model_purpose(settings, purpose, provider.primary_model())
+                    self.assertEqual(config.model, "deepseek-flash")
+                    self.assertEqual(config.options["thinking"], {"type": "disabled"})
             self.assertTrue(
                 (deepmate_home / "profiles" / "default" / "identity.md").exists()
             )
@@ -330,6 +339,7 @@ class ModelPurposeTests(unittest.TestCase):
             )
 
             settings = load_settings(root)
+            self.assertEqual(settings.provider("deepseek").primary_model(), "deepseek-v4-flash")
 
             self.assertIn("local", settings.providers)
             self.assertEqual(settings.provider("local").default_model, "qwen3-local")

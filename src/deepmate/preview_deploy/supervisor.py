@@ -8,6 +8,7 @@ import http.server
 import os
 import signal
 import socket
+import socketserver
 import sys
 import threading
 from http import HTTPStatus
@@ -22,6 +23,14 @@ from deepmate.preview_deploy.state import (
     parse_datetime,
 )
 from deepmate.runtime.wakelock import RuntimeWakeSession, WakeConfig
+
+
+class _PreviewServer(http.server.ThreadingHTTPServer):
+    def server_bind(self) -> None:
+        # The preview advertises numeric URLs. HTTPServer's reverse lookup on
+        # bind can otherwise consume the entire supervisor startup deadline.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 class _QuietStaticHandler(http.server.SimpleHTTPRequestHandler):
@@ -134,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         entry_path=args.entry_path,
     )
     try:
-        server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), handler)
+        server = _PreviewServer(("0.0.0.0", 0), handler)
     except OSError as exc:
         state = _state_from_args(args, status="stale", local_url="")
         store.save(
@@ -250,26 +259,28 @@ def _lan_url(port: int, entry_path: str) -> str:
 
 def _lan_ip() -> str:
     """Best-effort LAN IP discovery without requiring an outbound connection."""
-    candidates: list[str] = []
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.connect(("8.8.8.8", 80))
-            candidates.append(sock.getsockname()[0])
+            ip = sock.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return ip
     except OSError:
         pass
-    try:
-        candidates.extend(
-            ip
-            for ip in socket.gethostbyname_ex(socket.gethostname())[2]
-            if isinstance(ip, str)
-        )
-    except OSError:
-        pass
-    for ip in candidates:
-        clean = ip.strip()
-        if clean and not clean.startswith("127."):
-            return clean
-    return ""
+    # A disconnected machine may take seconds to resolve its own hostname.
+    # The optional LAN link must leave time for the local preview to start.
+    addresses: list[str] = []
+
+    def resolve_hostname() -> None:
+        try:
+            addresses.extend(socket.gethostbyname_ex(socket.gethostname())[2])
+        except OSError:
+            pass
+
+    resolver = threading.Thread(target=resolve_hostname, daemon=True)
+    resolver.start()
+    resolver.join(timeout=0.25)
+    return next((ip for ip in addresses if ip and not ip.startswith("127.")), "")
 
 
 def _quote_segment(value: str) -> str:

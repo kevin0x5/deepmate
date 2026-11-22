@@ -150,6 +150,9 @@ class TaskSessionController:
                 lines.append(f"last_reason: {state.last_reason}")
             if state.next_instruction:
                 lines.append(f"next: {state.next_instruction}")
+            if state.contract_status:
+                lines.extend(("", "contract status:"))
+                lines.extend(f"- {item}" for item in state.contract_status)
         lines.extend(
             (
                 "",

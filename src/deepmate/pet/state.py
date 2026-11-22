@@ -249,6 +249,8 @@ class PetStateStore:
                     try:
                         payload = json.loads(raw_line.decode("utf-8"))
                     except (UnicodeDecodeError, json.JSONDecodeError):
+                        if not raw_line.endswith(b"\n"):
+                            break
                         payload = {"action": "invalid"}
                     if not isinstance(payload, Mapping):
                         payload = {"action": "invalid"}
@@ -350,6 +352,8 @@ class PetStateStore:
                     try:
                         payload = json.loads(raw_line.decode("utf-8"))
                     except (UnicodeDecodeError, json.JSONDecodeError):
+                        if not raw_line.endswith(b"\n"):
+                            break
                         payload = {}
                     if isinstance(payload, dict):
                         pending.append((index, payload))

@@ -16,11 +16,11 @@ from unittest.mock import patch
 
 from rich.markdown import Markdown as RichMarkdown
 from rich.padding import Padding
-from rich.table import Table
 from rich.text import Text
 from textual import events
 from textual.geometry import Offset
 from textual.selection import Selection
+from textual.widgets import TextArea
 
 from deepmate.behavior import behavior_runtime_for_session
 from deepmate.channels.cli import (
@@ -179,6 +179,129 @@ from deepmate.tools import (
 
 
 class TuiChannelTests(unittest.TestCase):
+    def test_compact_workbench_keyboard_navigation_and_resize(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = _workspace(Path(tmp))
+            (workspace / "中文.txt").write_text("保留文字", encoding="utf-8")
+            app = DeepmateTuiApp(_state(workspace))
+
+            async def run() -> None:
+                async with app.run_test(size=(42, 12)) as pilot:
+                    await pilot.pause()
+                    prompt = app.query_one("#prompt-input", _PromptTextArea)
+                    chat = app.query_one("#chat", _SelectableRichLog)
+                    self.assertFalse(app.sidebar_visible)
+                    self.assertGreater(chat.size.width, 36)
+                    await pilot.press("a", "shift+enter", "b")
+                    self.assertEqual(prompt.text, "a\nb")
+                    prompt.select_all()
+                    prompt.post_message(events.Paste("保留草稿"))
+                    await pilot.pause()
+                    self.assertEqual(prompt.text, "保留草稿")
+                    await pilot.press("ctrl+b")
+                    self.assertEqual(app.focused.id, "file-tree")
+                    self.assertFalse(app.query_one("#content").display)
+                    tree = app.query_one("#file-tree")
+                    tree.index = app._file_items.index("中文.txt")
+                    await pilot.press("enter")
+                    self.assertEqual(app._active_tab, "中文.txt")
+                    self.assertFalse(app.sidebar_visible)
+                    self.assertIn("Esc", app._status_label())
+                    await pilot.press("escape")
+                    self.assertEqual(app._active_tab, "main")
+                    self.assertEqual(prompt.text, "保留草稿")
+                    prompt.load_text("/")
+                    await pilot.pause()
+                    await pilot.press(*(["down"] * 9))
+                    panel = app.query_one("#command-hints")
+                    selected = app._selected_command_hint()
+                    self.assertIn("› " + selected, Text.from_markup(str(panel.content)).plain)
+                    self.assertLessEqual(panel.size.height, 3)
+                    await pilot.press("tab")
+                    self.assertEqual(prompt.text.strip(), selected)
+                    await pilot.press("escape")
+                    self.assertFalse(panel.display)
+                    await pilot.resize_terminal(120, 32)
+                    await pilot.pause()
+                    self.assertTrue(app.sidebar_visible)
+                    await pilot.press("ctrl+b")
+                    self.assertFalse(app.sidebar_visible)
+                    await pilot.resize_terminal(60, 16)
+                    await pilot.resize_terminal(120, 32)
+                    await pilot.pause()
+                    self.assertFalse(app.sidebar_visible)
+
+            asyncio.run(run())
+
+    def test_resume_renders_existing_conversation_and_reflows_long_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = _state(_workspace(Path(tmp)))
+            for role, content in ((MessageRole.USER, "继续之前的任务"), (MessageRole.ASSISTANT, "这是已保存的回复" * 15)):
+                state.transcript.append_item(ModelConversationItem.from_message(Message(role=role, content=content)))
+            app = DeepmateTuiApp(state)
+
+            async def run() -> None:
+                async with app.run_test(size=(120, 32)) as pilot:
+                    await pilot.pause()
+                    self.assertEqual([item.kind for item in app._main_messages], ["user", "assistant"])
+                    await pilot.resize_terminal(42, 12)
+                    await pilot.pause()
+                    log = app.query_one("#chat", _SelectableRichLog)
+                    self.assertLessEqual(log.virtual_size.width, log.size.width)
+                    self.assertEqual("".join(line.text for line in log.lines).replace(" ", "").count("这"), 15)
+
+            asyncio.run(run())
+
+    def test_unicode_preview_pages_and_initial_staged_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            value = "中😀文末"
+            (workspace / "中文.txt").write_text(value, encoding="utf-8")
+            for budget in (1, 2, 4, 5):
+                pages = []
+                offset = 0
+                while offset < len(value.encode()):
+                    page = read_workspace_file_preview(workspace, "中文.txt", offset=offset, max_bytes=budget)
+                    self.assertGreater(page.end, offset)
+                    pages.append(page.content)
+                    offset = page.end
+                self.assertEqual("".join(pages), value)
+            self.assertEqual(read_workspace_file_preview(workspace, "中文.txt", offset=2, max_bytes=3).content, "中")
+            subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+            subprocess.run(["git", "add", "中文.txt"], cwd=workspace, check=True)
+            (workspace / "中文.txt").write_text("未暂存改动", encoding="utf-8")
+            report = workspace_diff(workspace)
+            for expected in ("Staged", "+" + value, "Working tree", "+未暂存改动", "中文.txt"):
+                self.assertIn(expected, report)
+
+    def test_streaming_replaces_only_the_last_rendered_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = DeepmateTuiApp(_state(_workspace(Path(tmp))))
+
+            async def run() -> None:
+                async with app.run_test(size=(60, 16)) as pilot:
+                    for i in range(15):
+                        app._write(_message("assistant", f"之前的回复 {i}"))
+                    app._start_live_work("旧的长进度" * 20)
+                    await pilot.pause()
+                    log = app.query_one("#chat", _SelectableRichLog)
+                    app.action_scroll_active_home()
+                    await pilot.pause()
+                    with patch("deepmate.channels.tui.app._render_message", wraps=_render_message) as render:
+                        app._start_live_work("进度已更新")
+                        app._start_live_work("进度已更新")
+                        self.assertEqual(render.call_count, 1)
+                    await pilot.pause()
+                    text = "\n".join(line.text for line in log.lines)
+                    self.assertIn("之前的回复 14", text)
+                    self.assertNotIn("旧的长进度", text)
+                    self.assertEqual(text.count("进度已更新"), 1)
+                    self.assertEqual(log.scroll_y, 0)
+                    app._clear_live_work()
+                    self.assertFalse(any("进度已更新" in line.text for line in log.lines))
+
+            asyncio.run(run())
+
     def test_result_installed_skill_detects_install_from_request(self) -> None:
         # The model-facing installer in interactive mode is
         # install_skill_from_request; a successful call must trigger a refresh.
@@ -382,7 +505,7 @@ class TuiChannelTests(unittest.TestCase):
         messages = result_messages(result)
 
         self.assertEqual(messages[0].kind, "tool shell")
-        self.assertIn("Completed.", messages[0].body)
+        self.assertEqual(messages[0].body, "line 1")
         self.assertNotIn("01234567890123456789", messages[0].body)
         self.assertIn("01234567890123456789", messages[0].preview)
 
@@ -1240,7 +1363,7 @@ class TuiChannelTests(unittest.TestCase):
 
             self.assertTrue(result.handled)
             self.assertIn("上次准备", result.messages[0].body)
-            self.assertIn("上次本地模型没有准备完成", result.messages[0].body)
+            self.assertIn("本地模型上次没有准备完成", result.messages[0].body)
 
     def test_tui_local_prepare_success_runs_queued_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1412,14 +1535,9 @@ class TuiChannelTests(unittest.TestCase):
         )
 
         self.assertIsInstance(user, Padding)
-        self.assertEqual((user.top, user.right, user.bottom, user.left), (1, 0, 1, 0))
-        table = user.renderable
-        self.assertIsInstance(table, Table)
-        self.assertTrue(table.expand)
-        self.assertEqual(str(table.style), "on #2c2c2c")
-        self.assertEqual(str(table.rows[0].style), "on #2c2c2c")
-        self.assertEqual(table.columns[0]._cells[0].plain, "\n› Fix it.\n")
-        self.assertNotIn("You", table.columns[0]._cells[0].plain)
+        self.assertEqual((user.top, user.right, user.bottom, user.left), (0, 0, 1, 0))
+        self.assertIsInstance(user.renderable, Padding)
+        self.assertEqual(user.renderable.renderable.plain, "› Fix it.")
         self.assertIsInstance(assistant, Padding)
         self.assertIsInstance(assistant.renderable, RichMarkdown)
         self.assertEqual(assistant.renderable.markup, "Done.")
@@ -1443,7 +1561,7 @@ class TuiChannelTests(unittest.TestCase):
         self.assertIn("∴ Thinking", rendered)
         self.assertNotIn("collapsed", rendered)
 
-    def test_tui_tool_message_uses_family_hierarchy(self) -> None:
+    def test_tui_tool_message_identifies_action_once(self) -> None:
         rendered = _render_message(
             TuiMessage(
                 kind="tool shell",
@@ -1453,9 +1571,7 @@ class TuiChannelTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("Action: command", rendered)
-        self.assertIn("run_shell_command", rendered)
-        self.assertNotIn("tool browser", rendered)
+        self.assertEqual(rendered.plain, "✓ run_shell_command  Completed.")
 
     def test_tui_permission_summary_is_not_rendered_as_status(self) -> None:
         rendered = _render_message(
@@ -1466,10 +1582,7 @@ class TuiChannelTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("Permissions", rendered)
-        self.assertIn("Allowed (session): shell execution", rendered)
-        self.assertNotIn("Status", rendered)
-        self.assertNotIn("approval", rendered.lower())
+        self.assertEqual(rendered.plain, "✓ Allowed (session): shell execution")
 
     def test_tui_live_status_renders_without_runtime_header(self) -> None:
         rendered = _render_message(
@@ -1486,54 +1599,19 @@ class TuiChannelTests(unittest.TestCase):
         self.assertNotIn("Status", rendered)
         self.assertNotIn("live", rendered)
 
-    def test_tui_welcome_message_preserves_internal_markup(self) -> None:
-        body = _welcome_splash(
-            workspace="/tmp/[demo]",
-            session_id="session-abcdef",
-            provider_name="stub",
-            api_key_env="STUB_API_KEY",
-            api_key_available=True,
-        )
-        rendered = _render_message(TuiMessage(kind="welcome", title="new session", body=body))
-
-        self.assertIn("[bold #e0e0e0]Deepmate[/]", rendered)
-        self.assertIn("[#8fb7bd] /\\_/\\  [/]", rendered)
-        self.assertIn("( o o )", rendered)
-        self.assertIn("[#d0b66b]=  ^  =  [/]", rendered)
-        self.assertIn("/commands", rendered)
-        self.assertIn("/status", rendered)
-        self.assertIn("/task", rendered)
-        self.assertNotIn("Approvals:", rendered)
-        self.assertNotIn("/trust", rendered)
-        self.assertNotIn("/trust off", rendered)
-        self.assertNotIn("/diff", rendered)
-        self.assertIn("\\[demo]", rendered)
-        self.assertNotIn("/tmp/[demo]", rendered)
-
-    def test_tui_welcome_shortcuts_fit_with_file_tree_open(self) -> None:
-        body = _welcome_splash(
-            workspace="/tmp/demo",
-            session_id="session-abcdef",
-            provider_name="stub",
-            api_key_env="STUB_API_KEY",
-            api_key_available=True,
-        )
-
-        shortcut_lines = [
-            Text.from_markup(line).plain
-            for line in body.splitlines()
-            if "/commands" in line and "/status" in line and "/task" in line
-        ]
-
-        self.assertEqual(len(shortcut_lines), 1)
-        shortcut_text = " ".join(shortcut_lines[0].split())
-        self.assertIn("try /commands /status /task files", shortcut_text)
-        self.assertLessEqual(len(shortcut_text.split("try ", 1)[1]), 36)
+    def test_tui_welcome_shows_workspace_and_next_action(self) -> None:
+        body = _welcome_splash(workspace="/tmp/[demo]")
+        text = Text.from_markup(body).plain
+        self.assertIn("[demo]", text)
+        self.assertIn("最近的改动", text)
+        self.assertIn("@ 引用文件", text)
+        self.assertIn("/ 选择命令", text)
+        self.assertNotIn("/setup-key", text)
+        self.assertLessEqual(len(text.splitlines()), 3)
 
     def test_tui_welcome_message_uses_current_provider_key_status(self) -> None:
         body = _welcome_splash(
             workspace="/tmp/demo",
-            session_id="session-abcdef",
             provider_name="custom",
             api_key_env="CUSTOM_API_KEY",
             api_key_available=False,
@@ -1541,7 +1619,7 @@ class TuiChannelTests(unittest.TestCase):
         rendered = _render_message(TuiMessage(kind="welcome", title="new session", body=body))
 
         self.assertIn("CUSTOM_API_KEY", rendered)
-        self.assertIn("provider custom", rendered)
+        self.assertIn("custom 尚未配置密钥", rendered)
         self.assertIn("/setup-key", rendered)
         self.assertNotIn("DEEPSEEK_API_KEY", rendered)
 
@@ -1568,45 +1646,51 @@ class TuiChannelTests(unittest.TestCase):
         self.assertNotIn("$primary", css)
         self.assertNotIn("$block-cursor-background", css)
         self.assertIn("screen > .screen--selection", css)
-        self.assertIn("#4a5658", css)
+        self.assertIn("$dm-selected", css)
         self.assertIn("#file-tree:focus > listitem.-highlight", css)
         self.assertIn("#file-tree > listitem.-highlight label", css)
-        self.assertIn("background: #4a5658 !important", css)
+        self.assertIn("background: $dm-selected !important", css)
         self.assertIn(".session-tab-active", css)
 
-    def test_tui_css_matches_input_row_to_user_message_height(self) -> None:
-        css = DeepmateTuiApp.CSS.lower()
+    def test_tui_header_and_editor_fit_normal_and_compact_terminals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = DeepmateTuiApp(_state(_workspace(Path(tmp))))
 
-        self.assertIn(
-            "#input-row {\n        width: 1fr;\n        min-width: 0;\n        height: auto;",
-            css,
-        )
-        self.assertIn("max-height: 10;", css)
-        self.assertIn("padding: 0 1;", css)
-        self.assertIn("overflow-x: hidden", css)
-        self.assertIn("overflow-y: auto", css)
-        self.assertIn("#input-gap {\n        height: 1;", css)
-        self.assertIn("#prompt-glyph {\n        width: 2;\n        height: 3;", css)
-        self.assertIn("#prompt-input {\n        width: 1fr;\n        min-width: 0;\n        height: auto;", css)
-        self.assertIn("max-height: 8;", css)
-        self.assertIn("margin: 1 0;", css)
-        self.assertIn(".text-area--cursor", css)
-        self.assertIn("#sidebar {\n        width: 36;", css)
-        self.assertIn("border-right: solid #464646;", css)
-        self.assertIn(".session-tab:hover", css)
-        self.assertIn("background: #3f3f3f !important", css)
-        self.assertIn("#title-bar {\n        background: #333333;", css)
-        self.assertIn("background: #2c2c2c;", css)
-        self.assertIn("border-left: solid #8fb7bd;", css)
-        self.assertIn("#content-markdown {\n        height: 1fr;", css)
-        self.assertIn("overflow-y: auto", css)
-        self.assertNotIn("border-bottom: solid #2d3b43", css)
+            async def run() -> None:
+                async with app.run_test(size=(120, 36)) as pilot:
+                    brand, model = app.query_one("#title-bar"), app.query_one("#model-name")
+                    self.assertEqual(brand.region.y, model.region.y)
+                    self.assertLessEqual(model.region.right, app.size.width)
+                    self.assertFalse(app.query_one("#context-window").display)
+                    self.assertFalse(app.query_one("#content-tabs").display)
+                    self.assertEqual(app.query_one("#sidebar").region.width, 26)
+                    editor = app.query_one("#prompt-input", TextArea)
+                    old_height = editor.region.height
+                    editor.load_text("line 1\nline 2\nline 3")
+                    await pilot.pause()
+                    self.assertGreater(editor.region.height, old_height)
+                    await pilot.resize_terminal(55, 17)
+                    self.assertFalse(model.display)
+                    self.assertFalse(app.sidebar_visible)
+                    self.assertEqual(editor.text, "line 1\nline 2\nline 3")
 
-    def test_tui_sidebar_defaults_open_with_close_hint(self) -> None:
-        self.assertTrue(DeepmateTuiApp.sidebar_visible._default)
-        css = DeepmateTuiApp.CSS
-        self.assertIn("#sidebar-hint {", css)
-        self.assertIn("background: #2f2f2f;", css)
+            asyncio.run(run())
+
+    def test_tui_file_hints_follow_keyboard_focus(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = DeepmateTuiApp(_state(_workspace(Path(tmp))))
+
+            async def run() -> None:
+                async with app.run_test(size=(120, 36)) as pilot:
+                    self.assertTrue(app.sidebar_visible)
+                    self.assertIn("Enter 发送", app._status_label())
+                    app.query_one("#file-tree").focus()
+                    await pilot.pause()
+                    self.assertIn("Enter 打开", app._status_label())
+                    self.assertNotIn("Enter 发送", app._status_label())
+                    self.assertEqual(len(app.query("#sidebar-hint")), 0)
+
+            asyncio.run(run())
 
     def test_tui_app_mounts_with_stylesheet(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1798,7 +1882,7 @@ class TuiChannelTests(unittest.TestCase):
                     self.assertEqual(len(worker_calls), 1)
                     self.assertEqual(messages[-1].kind, "user")
                     self.assertEqual(messages[-1].body, "介绍下你自己")
-                    self.assertIn("running", app._status_label())
+                    self.assertIn("执行中", app._status_label())
 
             asyncio.run(run())
 
@@ -2400,49 +2484,63 @@ class TuiChannelTests(unittest.TestCase):
             messages = tool_exchange_messages(exchange)
 
             self.assertTrue(target.is_file())
-            self.assertIn("✓ Wrote notes.md", messages[0].body)
-            self.assertIn("Full diff is available in /detail.", messages[0].body)
+            self.assertIn("notes.md", messages[0].body)
+            self.assertNotIn("/detail", messages[0].body)
             self.assertIn("```diff", messages[0].body)
             self.assertIn("+# Notes", messages[0].body)
             self.assertIn("+# Notes", messages[0].preview)
 
     def test_tui_approval_button_resolves_pending_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            workspace = _workspace(Path(tmp))
-            app = DeepmateTuiApp(_state(workspace))
-            messages = []
-            focused = []
-            app._write = messages.append
-            app._refresh_footer = lambda: None
-            app._render_approval_panel = lambda: None
+            app = DeepmateTuiApp(_state(_workspace(Path(tmp))))
 
-            class Prompt:
-                def focus(self) -> None:
-                    focused.append(True)
+            async def run() -> None:
+                async with app.run_test(size=(42, 12)) as pilot:
+                    await pilot.press("ctrl+b")
+                    first = _pending_approval("第一项申请")
+                    first.body = "\n".join(f"文件 {i}" for i in range(15))
+                    second = _pending_approval("第二项申请")
+                    app._show_pending_approval(first)
+                    app._show_pending_approval(second)
+                    await pilot.pause()
+                    self.assertFalse(app.sidebar_visible)
+                    scrolling = app.query_one("#approval-scroll")
+                    self.assertGreater(scrolling.max_scroll_y, 0)
+                    scrolling.focus()
+                    await pilot.press("end")
+                    await pilot.pause()
+                    self.assertGreater(scrolling.scroll_y, 0)
+                    await pilot.press("tab", "tab")
+                    self.assertEqual(app.focused.id, "approval-session")
+                    await pilot.press("enter")
+                    self.assertTrue(first.event.is_set())
+                    self.assertEqual(first.result, "session")
+                    self.assertFalse(second.event.is_set())
+                    await pilot.press("escape")
+                    self.assertTrue(second.event.is_set())
+                    self.assertEqual(second.result, "deny")
+                    self.assertEqual(app.focused.id, "prompt-input")
 
-            app.query_one = lambda selector, _widget_type=None: Prompt()
-            pending = app._pending_approval = _pending_approval("Tool approval")
+            asyncio.run(run())
 
-            class Event:
-                static = type("StaticRef", (), {"id": "approval-session"})()
-                stopped = False
+    def test_tui_wide_approval_keeps_actions_visible_below_long_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = DeepmateTuiApp(_state(_workspace(Path(tmp))))
 
-                def stop(self) -> None:
-                    self.stopped = True
+            async def run() -> None:
+                async with app.run_test(size=(120, 36)) as pilot:
+                    pending = _pending_approval("Review edit")
+                    pending.body = "\n".join(f"Change {line}" for line in range(50))
+                    app._show_pending_approval(pending)
+                    await pilot.pause()
+                    scrolling = app.query_one("#approval-scroll")
+                    self.assertGreater(scrolling.max_scroll_y, 0)
+                    self.assertGreater(scrolling.size.height, 6)
+                    self.assertTrue(await pilot.click("#approval-once"))
+                    self.assertTrue(pending.event.is_set())
+                    self.assertEqual(pending.result, "once")
 
-            event = Event()
-
-            app.on_static_clicked(event)
-
-            self.assertTrue(event.stopped)
-            self.assertEqual(pending.result, "session")
-            self.assertIsNone(app._pending_approval)
-            self.assertTrue(pending.event.is_set())
-            self.assertEqual(messages[-1].kind, "permissions")
-            self.assertEqual(messages[-1].title, "permissions")
-            self.assertEqual(messages[-1].status, "")
-            self.assertIn("Allowed (session): Tool approval", messages[-1].body)
-            self.assertEqual(focused, [True])
+            asyncio.run(run())
 
     def test_tui_pending_approval_uses_panel_without_chat_log_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2460,7 +2558,7 @@ class TuiChannelTests(unittest.TestCase):
             self.assertIs(app._pending_approval, pending)
             self.assertEqual(renders, ["panel"])
             self.assertEqual(messages, [])
-            self.assertIn("approval · waiting for your choice", app._status_label())
+            self.assertIn("等待审批", app._status_label())
 
     def test_tui_pending_approvals_are_queued_fifo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2489,7 +2587,8 @@ class TuiChannelTests(unittest.TestCase):
             self.assertEqual(app._approval_queue, [second])
             self.assertFalse(first.event.is_set())
             self.assertFalse(second.event.is_set())
-            self.assertIn("1 queued", app._status_label())
+            self.assertEqual(app._approval_queue_count_for_current_session(), 1)
+            self.assertNotIn("queued", app._status_label())
 
             self.assertTrue(app._resolve_pending_approval("once"))
 
@@ -2498,7 +2597,7 @@ class TuiChannelTests(unittest.TestCase):
             self.assertIs(app._pending_approval, second)
             self.assertEqual(app._approval_queue, [])
             self.assertFalse(second.event.is_set())
-            self.assertEqual(renders, ["First approval", "Second approval"])
+            self.assertEqual(renders, ["First approval", "First approval", "Second approval"])
 
             self.assertTrue(app._resolve_pending_approval("deny"))
 
@@ -2690,13 +2789,13 @@ class TuiChannelTests(unittest.TestCase):
             fallback="tool=write_text_file",
         )
 
-        self.assertIn("Deepmate wants to create or overwrite a file.", body)
-        self.assertIn("Location: demo.html", body)
-        self.assertIn("Size: 14 chars", body)
-        self.assertIn("Content summary: new file content", body)
-        self.assertIn("Preview hidden", body)
+        self.assertIn("将创建或覆盖文件", body)
+        self.assertIn("路径  demo.html", body)
+        self.assertIn("长度  14 字符", body)
+        self.assertIn("写入内容", body)
+        self.assertIn("查看 HTML/XML 原文", body)
         self.assertNotIn("<h1>Hello</h1>", body)
-        self.assertIn("Allow once: applies to this request only", body)
+        self.assertNotIn("Allow once", body)
 
     def test_tui_edit_approval_body_hides_large_html_diff(self) -> None:
         body = _approval_body(
@@ -2712,10 +2811,10 @@ class TuiChannelTests(unittest.TestCase):
             fallback="tool=edit_text_file",
         )
 
-        self.assertIn("Deepmate wants to modify a file.", body)
-        self.assertIn("Location: report.html", body)
-        self.assertIn("Change summary:", body)
-        self.assertIn("Preview hidden", body)
+        self.assertIn("将修改文件", body)
+        self.assertIn("路径  report.html", body)
+        self.assertIn("差异  +1 -1", body)
+        self.assertIn("查看 HTML/XML 原文", body)
         self.assertNotIn("<table>", body)
         self.assertNotIn("<td>new</td>", body)
 
@@ -2737,7 +2836,7 @@ class TuiChannelTests(unittest.TestCase):
             None,
         )
         self.assertIsNotNone(added_span)
-        self.assertEqual(added_span.style, "green")
+        self.assertEqual(added_span.style, "diff.inserted")
 
     def test_tui_approval_diff_renderable_skips_when_nothing_to_show(self) -> None:
         # Identical text, markup content, and empty refs all yield no diff.
@@ -2908,9 +3007,11 @@ class TuiChannelTests(unittest.TestCase):
                     chat.write("hello selectable world", scroll_end=False)
                     chat.write("second selectable line", scroll_end=False)
 
-                    await pilot.mouse_down("#chat", offset=(1, 0))
-                    await pilot.hover("#chat", offset=(24, 0))
-                    await pilot.mouse_up("#chat", offset=(24, 0))
+                    x = chat.content_region.x - chat.region.x
+                    y = chat.content_region.y - chat.region.y
+                    await pilot.mouse_down("#chat", offset=(x, y))
+                    await pilot.hover("#chat", offset=(x + 23, y))
+                    await pilot.mouse_up("#chat", offset=(x + 23, y))
 
                     self.assertEqual(
                         app.screen.get_selected_text(),
@@ -2942,9 +3043,9 @@ class TuiChannelTests(unittest.TestCase):
                     content = app.query_one("#content-markdown", _SelectableRichLog)
                     self.assertTrue(content.display)
 
-                    await pilot.mouse_down("#content-markdown", offset=(1, 1))
-                    await pilot.hover("#content-markdown", offset=(12, 1))
-                    await pilot.mouse_up("#content-markdown", offset=(12, 1))
+                    await pilot.mouse_down("#content-markdown", offset=(1, 0))
+                    await pilot.hover("#content-markdown", offset=(12, 0))
+                    await pilot.mouse_up("#content-markdown", offset=(12, 0))
 
                     self.assertEqual(app.screen.get_selected_text(), "alpha beta")
 
@@ -3691,21 +3792,16 @@ class TuiChannelTests(unittest.TestCase):
             app = DeepmateTuiApp(state)
 
             self.assertFalse(_transcript_has_items(state))
-            self.assertEqual(app._status_label(), "")
+            self.assertIn("Ctrl+B 文件", app._status_label())
             self.assertNotIn("F1 Help", app._status_label())
-            messages = []
-            app._write = messages.append
-            app._write_start_message()
-            self.assertEqual(len(messages), 1)
-            self.assertEqual(messages[-1].kind, "welcome")
-            self.assertIn("Deepmate", messages[-1].body)
-            self.assertIn("/commands", messages[-1].body)
+            self.assertEqual(app._welcome_message().kind, "welcome")
+            self.assertFalse(app._main_messages)
             app.sidebar_visible = False
-            self.assertEqual(app._status_label(), "")
+            self.assertIn("Ctrl+B 文件", app._status_label())
             app._running_turn = True
             self.assertEqual(
                 app._status_label(),
-                "stub-main  │  ⠋ running  │  Esc interrupt",
+                "⠋ 执行中  │  Esc 中断",
             )
             app._running_turn = False
             state.behavior_runtime = behavior_runtime_for_session(
@@ -3715,18 +3811,15 @@ class TuiChannelTests(unittest.TestCase):
                 session_id=state.session.session_id,
             )
             state.behavior_runtime.set_computer_use(True)
-            self.assertEqual(app._status_label(), "stub-main  │  computer on")
+            self.assertEqual(app._status_label(), "computer on")
             state.behavior_runtime.set_computer_use(False)
 
             state.transcript.append_item(
                 ModelConversationItem(message=Message(role=MessageRole.USER, content="hi"))
             )
             self.assertTrue(_transcript_has_items(state))
-            messages.clear()
-            app._write_start_message()
-            self.assertEqual(len(messages), 1)
-            self.assertEqual(messages[-1].kind, "welcome")
-            self.assertIn("Deepmate", messages[-1].body)
+            app._restore_main_messages_from_transcript()
+            self.assertEqual([m.kind for m in app._main_messages], ["user"])
 
     def test_workspace_diff_renders_summary_and_raw_diff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3752,10 +3845,9 @@ class TuiChannelTests(unittest.TestCase):
             with patch("deepmate.channels.tui.files.subprocess.run", fake_run):
                 report = workspace_diff(workspace)
 
-            self.assertIn("changed files: 2", report)
+            self.assertIn("2 files changed", report)
             self.assertIn("modified: src/app.py (+2/-1)", report)
             self.assertIn("untracked: notes.md", report)
-            self.assertIn("Raw diff", report)
             self.assertIn("+print('ok')", report)
 
     def test_workspace_diff_handles_renamed_files_numstat(self) -> None:
@@ -3808,9 +3900,9 @@ class TuiChannelTests(unittest.TestCase):
             self.assertTrue(result.handled)
             self.assertEqual(result.messages[0].title, "command palette")
             self.assertIn("content tab", result.messages[0].body)
-            self.assertIn("/diff - Open workspace diff", result.messages[0].preview)
-            self.assertIn("/pet - Show desktop pet status", result.messages[0].preview)
-            self.assertIn("/close-tab - Close the current content tab", result.messages[0].preview)
+            self.assertIn("/diff - 查看工作区改动", result.messages[0].preview)
+            self.assertIn("/pet - 查看桌宠", result.messages[0].preview)
+            self.assertIn("/close-tab - 关闭当前内容页", result.messages[0].preview)
             self.assertNotIn("/help", result.messages[0].preview)
             self.assertNotIn("/?", result.messages[0].preview)
             self.assertIn("/task plan", result.messages[0].preview)
@@ -4117,7 +4209,7 @@ class TuiChannelTests(unittest.TestCase):
                 "shell: available on explicit shell request with approval",
                 status.messages[0].preview,
             )
-            self.assertEqual(app._status_label(), "")
+            self.assertIn("Ctrl+B 文件", app._status_label())
 
     def test_tui_file_preview_uses_auto_render_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4242,30 +4334,38 @@ class TuiChannelTests(unittest.TestCase):
             self.assertNotIn(sid, app._stream_content)
             self.assertNotIn(sid, app._stream_reasoning)
 
-    def test_tui_final_callback_does_not_clear_live_work(self) -> None:
+    def test_final_answer_replaces_stream_and_ignores_late_deltas(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            workspace = _workspace(Path(tmp))
-            state = _state(workspace)
+            state = _state(_workspace(Path(tmp)))
             app = DeepmateTuiApp(state)
             app._render_active_tab = lambda: None
-            app._refresh_content_tabs = lambda: None
-            app._turn_started_at = monotonic()
-            app._start_live_work("Preparing context...")
-            app._session_turns[state.session.session_id] = _TurnRun(
-                session_id=state.session.session_id,
-                started_at=app._turn_started_at,
-            )
+            session_id = state.session.session_id
+            app._session_turns[session_id] = _TurnRun(session_id=session_id, started_at=monotonic())
+            app._stream_pending[session_id] = [("Done.", "")]
+            app._flush_token_stream()
+            final = (TuiMessage(kind="assistant", title="assistant", body="Done."),)
+            app._append_final_messages_for_session(session_id, final)
+            app._stream_tokens_from_worker_for_session(session_id, "Done.", "")
+            app._flush_token_stream()
+            app._append_messages(final, session_id=session_id)
+            self.assertEqual(app._main_messages, list(final))
+            self.assertNotIn(session_id, app._session_live_status)
 
-            app._append_final_messages_for_session(
-                state.session.session_id,
-                (TuiMessage(kind="assistant", title="assistant", body="Done."),),
-            )
-
-            self.assertTrue(
-                any(message.status == "live" for message in app._main_messages)
-            )
-            self.assertFalse(any(message.title == "done" for message in app._main_messages))
-            self.assertEqual(app._main_messages[-2].kind, "assistant")
+    def test_old_worker_cannot_stream_into_next_turn_with_same_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = DeepmateTuiApp(_state(_workspace(Path(tmp))))
+            app._render_active_tab = lambda: None
+            sid = app.state.session.session_id
+            final = (TuiMessage(kind="assistant", title="assistant", body="OK"),)
+            for _ in range(2):
+                app._session_turns[sid] = _TurnRun(session_id=sid, started_at=monotonic())
+                app._stream_pending[sid] = []
+                if app._main_messages:
+                    previous.token_stream_callback("stale", "")
+                    self.assertEqual(app._stream_pending[sid], [])
+                previous = app._state_for_worker_turn(sid)
+                app._append_final_messages_for_session(sid, final)
+            self.assertEqual(app._main_messages, [*final, *final])
 
     def test_tui_turn_result_inserts_after_own_prompt_when_next_prompt_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4443,6 +4543,40 @@ class TuiChannelTests(unittest.TestCase):
                 ],
             )
 
+    def test_preview_scroll_hint_tracks_visible_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = DeepmateTuiApp(_state(_workspace(Path(tmp))))
+
+            async def run() -> None:
+                async with app.run_test(size=(114, 32)) as pilot:
+                    footer = app.query_one("#status-bar")
+                    preview = app.query_one("#content-markdown", _SelectableRichLog)
+                    app._open_content_tab("notes.txt", "\n".join(f"Line {i}" for i in range(18)))
+                    await pilot.pause()
+                    self.assertEqual(str(footer.content), "Esc 返回对话")
+
+                    await pilot.resize_terminal(114, 14)
+                    await pilot.pause()
+                    self.assertIn("Page Up / Page Down 滚动", str(footer.content))
+                    await pilot.press("pagedown")
+                    self.assertGreater(preview.scroll_y, 0)
+                    await pilot.press("pageup")
+                    self.assertEqual(preview.scroll_y, 0)
+                    self.assertTrue(app._chat_follow_tail)
+
+                    await pilot.resize_terminal(114, 32)
+                    await pilot.pause()
+                    self.assertEqual(str(footer.content), "Esc 返回对话")
+                    await pilot.resize_terminal(114, 14)
+                    await pilot.pause()
+                    app._open_content_tab("short.txt", "One line")
+                    await pilot.pause()
+                    self.assertEqual(str(footer.content), "Esc 返回对话")
+                    await pilot.press("escape")
+                    self.assertEqual(app._active_tab, "main")
+
+            asyncio.run(run())
+
     def test_tui_active_content_scroll_targets_main_or_tab(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = _workspace(Path(tmp))
@@ -4578,10 +4712,15 @@ class TuiChannelTests(unittest.TestCase):
             deep = workspace / "pkg" / "feature"
             deep.mkdir(parents=True)
             (deep / "target.py").write_text("print('ok')\n", encoding="utf-8")
+            generated = workspace / "src" / "deepmate.egg-info"
+            generated.mkdir(parents=True, exist_ok=True)
+            (generated / "target.txt").touch()
 
             matches = workspace_file_matches(workspace, "target", limit=5)
 
             self.assertIn("pkg/feature/target.py", matches)
+            self.assertNotIn("src/deepmate.egg-info/target.txt", matches)
+            self.assertEqual(workspace_file_matches(workspace, "target", limit=0), ())
 
     def test_tui_file_reference_command_opens_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4663,7 +4802,7 @@ class TuiChannelTests(unittest.TestCase):
             workspace = _workspace(Path(tmp))
             app = DeepmateTuiApp(_state(workspace))
 
-            self.assertTrue(app._content_tabs_visible())
+            self.assertFalse(app._content_tabs_visible())
             app.sidebar_visible = False
             self.assertFalse(app._content_tabs_visible())
 
@@ -4801,7 +4940,7 @@ class TuiChannelTests(unittest.TestCase):
             self.assertIn("Preparing context", app._main_messages[-1].body)
             self.assertIsNotNone(app._pending_status_message)
             self.assertIn("Preparing context", app._pending_status_message.body)
-            self.assertIn("running  │  Esc interrupt", app._status_label())
+            self.assertIn("执行中  │  Esc 中断", app._status_label())
 
     def test_tui_live_work_updates_single_message_and_clears(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4822,7 +4961,7 @@ class TuiChannelTests(unittest.TestCase):
             self.assertEqual(app._main_messages[0].status, "live")
             self.assertEqual(app._main_messages[0].body, "正在调用工具：search")
             self.assertEqual(app._pending_status_message.body, "正在调用工具：search")
-            self.assertIn("running  │  Esc interrupt", app._status_label())
+            self.assertIn("执行中  │  Esc 中断", app._status_label())
             self.assertNotIn("正在调用工具：search", app._status_label())
 
             app._clear_live_work()
@@ -5167,12 +5306,22 @@ class TuiChannelTests(unittest.TestCase):
         gitignore = _preview_tab_content(".gitignore", "*.pyc\n# cache\n")
         fenced = _preview_tab_content("notes.txt", "```bad\n")
 
-        self.assertTrue(markdown.startswith("# Title"))
-        self.assertTrue(python.startswith("```python\n"))
-        self.assertIn("print('ok')", python)
-        self.assertTrue(gitignore.startswith("```text\n"))
-        self.assertIn("*.pyc", gitignore)
-        self.assertIn("``\\`bad", fenced)
+        self.assertIsInstance(markdown, RichMarkdown)
+        self.assertEqual(markdown.markup, "# Title\n\nBody")
+        self.assertEqual(python.plain, "print('ok')")
+        self.assertEqual(gitignore.plain, "*.pyc\n# cache")
+        self.assertEqual(fenced.plain, "```bad")
+
+    def test_tui_diff_preserves_literal_lines_and_marks_only_patch_deletions(self) -> None:
+        report = "- summary\ndiff --git a/x b/x\n@@ -1 +1 @@\n-  [old]\n+  [new]"
+        view = _preview_tab_content("workspace diff", report, mode="markdown")
+        self.assertEqual(view.plain, report)
+        colored = [view.plain[span.start:span.end].rstrip() for span in view.spans]
+        self.assertNotIn("- summary", colored)
+        self.assertIn("-  [old]", colored)
+        self.assertIn("+  [new]", colored)
+        detail = "Edited x\n\nDiff:\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-  [old]\n+  [new]"
+        self.assertEqual(_preview_tab_content("edit_text_file", detail, mode="markdown").plain, detail)
 
     def test_tui_find_in_content_preview_reports_matching_lines(self) -> None:
         preview, total = _find_in_content_preview(
@@ -5346,6 +5495,7 @@ class TuiChannelTests(unittest.TestCase):
                 decision=ExecuteDecision.CONTINUE,
                 reason="verification still missing",
                 next_instruction="run focused checks",
+                contract_status=("Detailed acceptance item",),
             )
 
             def task_maintenance(prompt, final_text, current_session, current_runtime):
@@ -5369,6 +5519,8 @@ class TuiChannelTests(unittest.TestCase):
             bodies = "\n".join(message.body for message in messages)
             self.assertIn("task/execute continuing", bodies)
             self.assertIn("verification still missing", bodies)
+            self.assertIn("run focused checks", bodies)
+            self.assertNotIn("Detailed acceptance item", bodies)
             self.assertEqual(
                 updated.task_continuations,
                 (continuation_prompt(evaluation),),
@@ -5582,6 +5734,69 @@ class TuiChannelTests(unittest.TestCase):
                 captured["tool_access_policy"].mode,
                 ToolAccessMode.WORKSPACE_WRITE,
             )
+
+    def test_cli_tui_switch_routes_task_checks_summaries_and_workers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = _workspace(Path(tmp))
+            preset = local_model_by_id("qwen3-lite")
+            local = _StubProvider([
+                ModelResponse(content="I checked the links."),
+                ModelResponse(content="{}"),
+                ModelResponse(content='{"decision":"blocked","reason":"Missing source file."}'),
+            ])
+            remote = _StubProvider([
+                ModelResponse(content="I checked again."),
+                ModelResponse(content="{}"),
+                ModelResponse(content='{"decision":"blocked","reason":"Missing source file."}'),
+            ])
+
+            def run(app):
+                state = app.state
+                state.local_provider = local
+                state.task_controller.store.ensure()
+                state.task_controller.store.write_plan(_execution_plan_md())
+                request = handle_tui_command("/local qwen3-lite", state).local_prepare
+                switched = apply_local_model_prepare_result(
+                    state, request, LocalModelInstallResult(ok=True, preset=preset, message="ready")
+                )
+                self.assertNotIn("已自动整理上下文", switched.messages[0].body)
+                self.assertIs(before_switch.call_args.kwargs["provider"], local)
+                self.assertEqual(before_switch.call_args.kwargs["fallback_model"], preset.runtime_name)
+                run_headless_tui_turn(state, "/task execute")
+                self.assertEqual([r.model for r in local.requests], [preset.runtime_name] * 3)
+                self.assertFalse(local.requests[-1].capabilities.supports_thinking)
+                self.assertFalse(remote.requests)
+                self.assertIs(after_turn.call_args.kwargs["provider"], local)
+                self.assertEqual(after_turn.call_args.kwargs["fallback_model"], preset.runtime_name)
+                self.assertIs(state.subagents.runtime_factory().provider, local)
+                self.assertIn("run_subagent", [s["name"] for s in state.tool_schemas])
+                state.runtime_stats.cache_hit_ratio = 0.75
+                handle_tui_command("/model remote", state)
+                self.assertIsNone(state.runtime_stats.cache_hit_ratio)
+                self.assertEqual(
+                    state.runtime_stats.model_context_tokens,
+                    state.conversation_budget_policy.model_context_tokens,
+                )
+                run_headless_tui_turn(state, "/task execute")
+                self.assertIs(after_turn.call_args.kwargs["provider"], remote)
+                self.assertEqual(after_turn.call_args.kwargs["provider_settings"].name, "deepseek")
+                self.assertIs(state.subagents.runtime_factory().provider, remote)
+                self.assertEqual([r.options["max_tokens"] for r in remote.requests[1:]], [1200, 700])
+                self.assertTrue(all(
+                    r.options["thinking"] == {"type": "disabled"} for r in remote.requests[1:]
+                ))
+
+            with (
+                patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key", "DEEPMATE_HOME": str(Path(tmp)/"home")}),
+                patch("deepmate.channels.cli.ChatCompletionsProvider", return_value=remote),
+                patch("deepmate.channels.cli.build_request_budget_report") as report,
+                patch("deepmate.channels.cli.force_session_summary_checkpoint", side_effect=lambda **kw: kw["runtime"]) as before_switch,
+                patch("deepmate.channels.cli.run_session_maintenance", side_effect=lambda **kw: kw["runtime"]) as after_turn,
+                patch.object(DeepmateTuiApp, "run", run),
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()),
+            ):
+                report.return_value.pressure_ratio = 1.0
+                self.assertEqual(main(("--interactive", "--workspace", str(workspace), "--subagents")), 0)
 
     def test_cli_interactive_passes_configured_local_provider_to_tui(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

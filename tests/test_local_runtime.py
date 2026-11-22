@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 import tempfile
 import threading
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +21,51 @@ from deepmate.providers import ModelResponse
 
 
 class LocalRuntimeTests(unittest.TestCase):
+    def test_running_service_with_installed_model_needs_no_cli_or_download(self) -> None:
+        preset = local_model_by_id("qwen3-local")
+        requests = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                requests.append(self.path)
+                payload = {"version": "fixture"} if self.path == "/api/version" else {"models": [{"name": preset.runtime_name}]}
+                self.reply(payload)
+
+            def do_POST(self):
+                requests.append(self.path)
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if body["model"] != preset.runtime_name:
+                    self.send_error(400)
+                    return
+                self.reply({"choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]})
+
+            def reply(self, payload):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode())
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server, tempfile.TemporaryDirectory() as tmp:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                runtime = OllamaLocalRuntime(api_url=f"http://127.0.0.1:{server.server_port}")
+                store = LocalModelStateStore(tmp)
+                with patch("deepmate.local.ollama.shutil.which", return_value=None):
+                    self.assertTrue(runtime.status().available)
+                    self.assertEqual(runtime.prepared_model(start_server=False), preset)
+                    result = runtime.prepare_model(preset, state_store=store, install_missing_runtime=False)
+                self.assertTrue(result.ok)
+                self.assertTrue(store.load().is_ready())
+                self.assertEqual(requests.count("/v1/chat/completions"), 1)
+                self.assertEqual(set(requests), {"/api/version", "/api/tags", "/v1/chat/completions"})
+            finally:
+                server.shutdown()
+                worker.join()
+
     def test_prepare_model_skips_alias_when_runtime_name_matches_ollama_ref(self) -> None:
         preset = local_model_by_id("qwen3-local")
         self.assertIsNotNone(preset)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -13,6 +12,7 @@ from typing import Mapping
 from deepmate.domain import ProfileRef
 from deepmate.foundation import utc_isoformat
 from deepmate.storage import JsonlWriter, atomic_write_text
+from deepmate.storage.jsonl import iter_jsonl_objects
 
 APPLIED_LOG_FILE = "applied_log.jsonl"
 
@@ -128,18 +128,8 @@ class EvolutionChangeStore:
 
     def load(self) -> tuple[EvolutionChange, ...]:
         """Load all parseable change records."""
-        if not self.path.exists():
-            return ()
         changes: list[EvolutionChange] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                raw_record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(raw_record, Mapping):
-                continue
+        for raw_record in iter_jsonl_objects(self.path):
             change = EvolutionChange.from_record(raw_record)
             if change.is_ready():
                 changes.append(change)

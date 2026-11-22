@@ -22,24 +22,26 @@ body {
 
 .sprite {
   position: absolute;
+  z-index: 1;
   left: 15px;
-  top: 20px;
-  width: 154px;
-  height: 132px;
+  top: 12px;
+  width: 160px;
+  height: 160px;
   image-rendering: pixelated;
-  filter: drop-shadow(0 9px 0 rgba(11, 18, 23, 0.11)) drop-shadow(0 12px 18px rgba(11, 18, 23, 0.12));
-  animation: idle-bob 2.4s steps(2) infinite;
-  transform-origin: 50% 80%;
+  filter: drop-shadow(0 2px 1px rgba(40, 32, 30, 0.18));
+  animation: idle-bob 3.2s ease-in-out infinite;
+  transform-origin: 50% 95%;
 }
 
 .shadow {
   position: absolute;
-  left: 47px;
-  bottom: 21px;
-  width: 96px;
-  height: 18px;
+  left: 52px;
+  bottom: 23px;
+  width: 86px;
+  height: 9px;
   border-radius: 50%;
-  background: rgba(21, 28, 33, 0.16);
+  background: rgba(39, 38, 32, 0.14);
+  filter: blur(2px);
 }
 
 .status-layer,
@@ -53,6 +55,7 @@ body {
 
 .status-layer {
   inset: 0;
+  z-index: 2;
 }
 
 .thought,
@@ -156,7 +159,7 @@ body {
 
 .state-working .sprite,
 .state-reporting .sprite {
-  animation: work-bob 0.46s steps(2) infinite;
+  animation: work-bob 1.2s ease-in-out infinite;
 }
 
 .state-thinking .thought {
@@ -182,7 +185,7 @@ body {
 
 .state-celebrate .sprite,
 .reaction-poke .sprite {
-  animation: celebrate 0.72s ease-in-out infinite;
+  animation: celebrate 0.72s ease-in-out 2;
 }
 
 .state-resting .sprite {
@@ -195,12 +198,13 @@ body {
 }
 
 .state-offline .sprite {
-  filter: grayscale(0.65) opacity(0.78) drop-shadow(0 7px 0 rgba(11, 18, 23, 0.14));
+  animation: none;
+  filter: saturate(0.55) opacity(0.83);
 }
 
 @keyframes idle-bob {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(3px); }
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.985); }
 }
 
 @keyframes work-bob {
@@ -231,6 +235,10 @@ body {
 }
 
 @keyframes rest {
-  0%, 100% { transform: translateY(12px) scaleY(0.88); }
-  50% { transform: translateY(14px) scaleY(0.84); }
+  0%, 100% { transform: scaleY(0.94); }
+  50% { transform: scaleY(0.92); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pet .sprite, .pet .status-layer > * { animation: none; }
 }

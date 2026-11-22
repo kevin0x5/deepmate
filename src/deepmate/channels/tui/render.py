@@ -10,7 +10,6 @@ from pathlib import Path
 from rich.markup import escape
 from rich.markdown import Markdown as RichMarkdown
 from rich.padding import Padding
-from rich.table import Table
 from rich.text import Text
 
 from deepmate.channels.tui.formatters import TuiMessage
@@ -85,17 +84,27 @@ def render_message(message: TuiMessage):
     title = message.title.strip()
     body = message.body.strip()
     style = _MESSAGE_STYLES.get(message.kind, "#d8d8d8")
+    if message.kind.startswith("tool "):
+        return _render_tool_message(message, style)
+    if message.kind == "status" and title == "post_edit_diagnostics_passed":
+        return Text("✓ 修改后检查通过", style="#a4afb4")
+    if message.kind == "task" and title == "task updated" and body:
+        outcome, _, details = body.partition("\n")
+        outcome_color = {
+            "task/execute complete": "#b7c8ac",
+            "task/execute blocked": "#e6a2a0",
+        }.get(outcome, "#e0c69c")
+        text = Text.assemble((outcome, f"bold {outcome_color}"))
+        if details.strip():
+            text.append("\n" + details.strip(), style="#c2cbce")
+        return text
+    if message.kind == "permissions":
+        if body.startswith("Allowed ("):
+            return Text.assemble(("✓ ", style), (body, "#c2cbce"))
+        if body.startswith("Denied: "):
+            return Text.assemble(("✗ ", _MESSAGE_STYLES["error"]), (body, "#c2cbce"))
     status = f" - {message.status}" if message.status else ""
     label = _MESSAGE_LABELS.get(message.kind, title or message.kind)
-    if message.kind.startswith("tool "):
-        family = message.kind.removeprefix("tool ").strip() or "tool"
-        label = f"Action: {_tool_family_label(family)}"
-        if message.status == "error":
-            style = _MESSAGE_STYLES["error"]
-        elif message.status == "approval required":
-            style = _MESSAGE_STYLES["approval"]
-        elif message.status in {"compacted", "pending"}:
-            style = _MESSAGE_STYLES["status"]
     prefix = _MESSAGE_PREFIXES.get(message.kind, "╭─")
     header_text = f"{prefix} {label}{status}" if prefix != "·" else f"· {label}{status}"
     if (
@@ -108,6 +117,8 @@ def render_message(message: TuiMessage):
     if not body:
         return header
     if message.kind == "user":
+        if message.status == "automatic":
+            return Text.assemble(("↻ ", "bold #f2bc7b"), (body, "#a4afb4"))
         return _user_prompt_block(readable_markdown(body))
     if message.kind == "assistant":
         return _assistant_markdown_block(body)
@@ -127,21 +138,13 @@ def _assistant_markdown_block(body: str) -> Padding:
 
 def _user_prompt_block(body: str) -> Padding:
     prompt = Text()
-    lines = body.strip().splitlines() or [""]
-    if len(lines) == 1:
-        prompt.append("\n")
-    for index, line in enumerate(lines):
+    for index, line in enumerate(body.strip().splitlines()):
         if index:
             prompt.append("\n")
-        prefix = "› " if index == 0 else "  "
-        prompt.append(prefix + line, style="#e0e0e0")
-    if len(lines) == 1:
-        prompt.append("\n")
-    table = Table.grid(expand=True)
-    table.add_column(ratio=1)
-    table.style = "on #2c2c2c"
-    table.add_row(prompt, style="on #2c2c2c")
-    return Padding(table, (1, 0, 1, 0), expand=True)
+        prompt.append("› " if index == 0 else "  ", style="bold #f2bc7b")
+        prompt.append(line, style="#edf0ea")
+    line = Padding(prompt, (0, 1), style="on #242e35")
+    return Padding(line, (0, 0, 1, 0))
 
 
 def _followup_block(body: str) -> Padding:
@@ -168,19 +171,31 @@ def _indent_message_body(text: str, kind: str) -> str:
     return "\n".join(f"│ {line}" if line else "│" for line in clean.splitlines())
 
 
-def _tool_family_label(value: str) -> str:
-    clean = value.strip()
-    return {
-        "shell": "command",
-        "browser": "browser",
-        "mcp": "external connection",
-        "skill": "skill",
-        "subagent": "subtask",
-        "read": "file read",
-        "write": "file edit",
-        "tool": "work",
-        "run_shell_command": "command",
-    }.get(clean, clean.replace("_", " ") or "work")
+def _render_tool_message(message: TuiMessage, style: str) -> Text:
+    icon, color = {
+        "ok": ("✓", style),
+        "compacted": ("↳", style),
+        "error": ("✗", _MESSAGE_STYLES["error"]),
+        "approval required": ("?", _MESSAGE_STYLES["approval"]),
+        "pending": ("…", _MESSAGE_STYLES["status"]),
+    }.get(message.status, ("·", style))
+    name = message.title.strip() or message.kind.removeprefix("tool ")
+    text = Text(f"{icon} {name}", style=color)
+    body = message.body.strip()
+    if not body:
+        return text
+    if message.title not in {"edit_text_file", "write_text_file"}:
+        text.append("  " + body, style="#c2cbce")
+        return text
+    head, fence, patch = body.partition("\n```diff\n")
+    text.append("  " + head, style="#c2cbce")
+    if fence:
+        patch, end, trailing = patch.partition("\n```")
+        text.append("\n")
+        text.append_text(preview_tab_content("change.patch", patch))
+        if end and trailing:
+            text.append(trailing, style="#c2cbce")
+    return text
 
 
 def preview_text(content: str, *, limit: int = 12_000) -> str:
@@ -195,74 +210,37 @@ def preview_text(content: str, *, limit: int = 12_000) -> str:
     )
 
 
-def preview_tab_content(title: str, content: str, *, mode: str = "auto") -> str:
-    """Return Markdown content for one workbench content tab."""
-    clean_mode = mode.strip().lower()
-    if clean_mode == "markdown" or (clean_mode == "auto" and _is_markdown_path(title)):
-        return _preview_markdown(content)
-    language = _code_fence_language(title)
-    return _preview_code_block(content, language=language)
-
-
-def _preview_markdown(content: str, *, limit: int = 80_000) -> str:
-    clean = content.strip()
-    if not clean:
-        return "_empty_"
-    if len(clean) <= limit:
-        return clean
-    return clean[: limit - 54].rstrip() + "\n\n> Content truncated by Deepmate TUI."
-
-
-def _preview_code_block(content: str, *, language: str = "", limit: int = 80_000) -> str:
+def preview_tab_content(title: str, content: str, *, mode: str = "auto") -> RichMarkdown | Text:
+    """Render Markdown documents and preserve literal characters in source files."""
+    suffix = Path(title).suffix.lower()
+    markdown = mode == "markdown" or (mode == "auto" and suffix in {".md", ".mdx", ".markdown"})
     clean = content.rstrip("\n")
-    if not clean:
-        return "```text\n(empty)\n```"
-    truncated = False
-    if len(clean) > limit:
-        clean = clean[: limit - 42].rstrip()
-        truncated = True
-    safe = clean.replace("```", "``\\`")
-    fence = f"```{language}" if language else "```"
-    if truncated:
-        safe += "\n\n[content truncated by Deepmate TUI]"
-    return f"{fence}\n{safe}\n```"
-
-
-def _is_markdown_path(path: str) -> bool:
-    suffix = _path_suffix(path)
-    return suffix in {"md", "mdx", "markdown"}
-
-
-def _path_suffix(path: str) -> str:
-    name = path.strip().rstrip("/").rsplit("/", 1)[-1].lower()
-    if "." not in name:
-        return ""
-    return name.rsplit(".", 1)[-1]
-
-
-def _code_fence_language(path: str) -> str:
-    suffix = _path_suffix(path)
-    return {
-        "py": "python",
-        "js": "javascript",
-        "jsx": "jsx",
-        "ts": "typescript",
-        "tsx": "tsx",
-        "json": "json",
-        "jsonl": "json",
-        "toml": "toml",
-        "yaml": "yaml",
-        "yml": "yaml",
-        "html": "html",
-        "css": "css",
-        "sh": "bash",
-        "bash": "bash",
-        "zsh": "bash",
-        "sql": "sql",
-        "xml": "xml",
-        "svg": "xml",
-        "txt": "text",
-    }.get(suffix, "text")
+    if len(clean) > 80_000:
+        clean = clean[:80_000] + "\n\n[预览已截断]"
+    detail_patch = mode == "markdown" and (
+        title == "workspace diff"
+        or (title in {"edit_text_file", "write_text_file"} and "\nDiff:\n--- " in clean)
+    )
+    if detail_patch or suffix in {".diff", ".patch"}:
+        text = Text(no_wrap=False, overflow="fold")
+        in_patch = suffix in {".diff", ".patch"}
+        for line in clean.splitlines(keepends=True):
+            if line.startswith(("diff --git ", "--- ", "+++ ")):
+                in_patch = True
+                style = "bold #e0c69c"
+            elif line.startswith("@@"):
+                style = "#a2c5d5"
+            elif line.startswith("+"):
+                style = "#a8cfab"
+            elif in_patch and line.startswith("-"):
+                style = "#e6a2a0"
+            else:
+                style = ""
+            text.append(line, style=style)
+        return text
+    if markdown:
+        return RichMarkdown(clean or "_空文件_", code_theme="ansi_dark", hyperlinks=False)
+    return Text(clean or "（空文件）", no_wrap=False, overflow="fold")
 
 
 def readable_markdown(text: str) -> str:
@@ -344,53 +322,27 @@ def clean_input_text(text: str) -> str:
 def welcome_splash(
     *,
     workspace: object,
-    session_id: str,
     provider_name: str = "",
     api_key_env: str = "",
     api_key_available: bool = True,
 ) -> str:
     """Return the first-run welcome text for an empty TUI session."""
-    clean_workspace = escape(compact_workspace_label(str(workspace), limit=28))
-    short_session = (session_id or "new-session").strip()
-    if short_session.startswith("session-"):
-        short_session = short_session[len("session-") :] or short_session
-    clean_session = escape(short_session[:8] or "new")
-    lines = [
-        "[#4a4a4a]······························[/]   [bold #e0e0e0]Deepmate[/] [#8a8a8a]local agent workspace[/]",
-        "[#4a4a4a]······[/][#8fb7bd] /\\_/\\  [/][#4a4a4a]················[/]   [#8a8a8a]New session is ready[/] [#8a8a8a]·[/] [#e0e0e0]Let‘s work on[/]",
-        "[#4a4a4a]····[/][#e0e0e0]  ( o o )  [/][#4a4a4a]···············[/]   [#8a8a8a]workspace[/] [#e0e0e0]"
-        + clean_workspace
-        + "[/]",
-        "[#4a4a4a]······[/][#d0b66b]=  ^  =  [/][#4a4a4a]···············[/]   [#8a8a8a]session[/] [#e0e0e0]"
-        + clean_session
-        + "[/]",
-        "[#4a4a4a]······························[/]   [#8a8a8a]try[/] [#8fb7bd]/commands[/] [#8fb7bd]/status[/] [#8fb7bd]/task[/]  [#8a8a8a]files[/] [#8fb7bd][/]",
-        "[#4a4a4a]·······································································[/]",
-    ]
-    missing_key = missing_api_key_env(
-        api_key_env=api_key_env,
-        api_key_available=api_key_available,
-    )
+    lines = []
+    if workspace is not None:
+        clean_workspace = escape(compact_workspace_label(str(workspace), limit=28))
+        lines.append(f"[bold #dce4df]工作区[/]  {clean_workspace}")
+    missing_key = missing_api_key_env(api_key_env=api_key_env, api_key_available=api_key_available)
     if missing_key:
-        provider_label = (
-            f" for provider {provider_name.strip()}" if provider_name.strip() else ""
-        )
-        lines.extend(
-            (
-                "",
-                f"[#d98a8a]Model key needed:[/] [#8a8a8a]paste it with[/] [#8fb7bd]/setup-key <api-key>[/][#8a8a8a]{escape(provider_label)}. Advanced env name:[/] [#e0e0e0]{escape(missing_key)}[/]",
-            )
-        )
-    lines.extend(
-        (
-            "",
-            "[#8a8a8a]Try asking:[/]",
-            "[#8fb7bd]  • Summarize this project structure and main modules[/]",
-            "[#8fb7bd]  • Find and fix a bug, then run tests[/]",
-            "[#8fb7bd]  • Explain the code of a function[/]",
-            "[#8fb7bd]  • Generate a code sample for a function[/]",
-        )
-    )
+        provider = escape(provider_name.strip() or "云端模型")
+        lines.extend((
+            f"[#f2bc7b]{provider} 尚未配置密钥[/]  ·  {escape(missing_key)}",
+            "[bold]/setup-key[/] 配置云端模型    [bold]/local[/] 使用本地模型",
+        ))
+    else:
+        lines.extend((
+            "[bold #dce4df]试试「检查这个项目最近的改动」。[/]",
+            "[#a4afb4]@ 引用文件    / 选择命令[/]",
+        ))
     return "\n".join(lines)
 
 

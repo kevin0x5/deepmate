@@ -12,6 +12,7 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from time import time_ns
 
@@ -23,7 +24,7 @@ from deepmate.app import (
     load_settings,
     resolve_model_purpose,
 )
-from deepmate.app.settings import DEFAULT_MODEL_CONTEXT_TOKENS
+from deepmate.app.settings import DEEPSEEK_PROVIDER_NAME, DEFAULT_MODEL_CONTEXT_TOKENS
 from deepmate.app import save_provider_api_key, save_wecom_remote_settings
 from deepmate.behavior import behavior_runtime_for_session
 from deepmate.capabilities import (
@@ -139,6 +140,7 @@ from deepmate.runtime import (
     start_runtime_activation,
 )
 from deepmate.providers.chat_completions import sanitize_model_request
+from deepmate.providers.usage import reported_cache_hit_ratio
 from deepmate.runtime.hooks import (
     HookActor,
     HookDirective,
@@ -171,6 +173,7 @@ from deepmate.skills import (
     update_skill_source,
     verify_skill_install,
 )
+from deepmate.storage.jsonl import iter_jsonl_objects
 from deepmate.storage import (
     SessionRecord,
     SessionStore,
@@ -1198,9 +1201,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 model,
             )
             maintenance_fallback_model = (
-                model
-                if provider_settings.name == LOCAL_PROVIDER_NAME
-                else provider_settings.primary_model()
+                provider_settings.primary_model()
+                if provider_settings.name == DEEPSEEK_PROVIDER_NAME
+                else model
             )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -1424,14 +1427,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             mcp_catalog=mcp_catalog,
             model_context_tokens=model_context_tokens,
         )
-        default_mcp_schema_tools = (
-            mcp_catalog.default_schema_tools(model_context_tokens)
-            if mcp_catalog is not None and local_model_by_runtime_name(model) is None
-            else ()
-        )
         all_tool_schemas = (
             *tool_schemas,
-            *(tool.schema() for tool in default_mcp_schema_tools),
+            *_default_mcp_schemas(mcp_catalog, model, model_context_tokens),
         )
         if local_model_by_runtime_name(model) is not None and prompt:
             all_tool_schemas = _schemas_with_local_prompt_extras(
@@ -1459,16 +1457,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             initial_delay_seconds=settings.provider_retry.initial_delay_seconds,
         )
         subagent_executor = None
+        make_subagent_executor = None
         if args.subagents:
             subagent_result_store = SubagentResultStore.in_data_dir(
-                settings.data_dir,
-                session.session_id,
+                settings.data_dir, session.session_id
             )
-            subagent_executor = _subagent_executor(
-                provider=provider,
+            make_subagent_executor = partial(
+                _subagent_executor,
                 settings=settings,
                 profile=session.profile,
-                model=model,
                 capability_surface=capability_surface,
                 native_tools=native_tools,
                 mcp_executor=mcp_executor,
@@ -1476,12 +1473,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 selected_skills=selected_skills,
                 activation=activation,
                 provider_retry_policy=provider_retry_policy,
-                options=options,
                 trace_recorder=trace_recorder,
                 tool_access_mode=tool_access_policy.mode,
-                provider_settings=provider_settings,
                 hook_context=hook_context,
                 result_store=subagent_result_store,
+            )
+            subagent_executor = make_subagent_executor(
+                provider=provider, provider_settings=provider_settings, model=model, options=options
             )
             all_tool_schemas = (*all_tool_schemas, *subagent_executor.schemas())
         for warning in skill_warnings:
@@ -1518,57 +1516,84 @@ def main(argv: Sequence[str] | None = None) -> int:
                 exposed_by_default=tool_output_store.has_records(),
             )
 
-        def post_turn_maintenance(
-            user_prompt,
-            current_session,
-            current_transcript,
-            current_runtime,
-        ) -> SessionRuntime:
-            return run_session_maintenance(
-                provider=provider,
-                settings=settings,
-                fallback_model=maintenance_fallback_model,
-                prompt=user_prompt,
-                session_store=session_store,
-                session=current_session,
-                transcript=current_transcript,
-                runtime=current_runtime,
-                conversation_budget_policy=conversation_budget_policy,
-                trace_recorder=trace_recorder,
-                warning_sink=_print_warning,
-                status_sink=_print_status,
-                hook_context=hook_context,
-                provider_settings=provider_settings,
-            )
+        def maintenance_handlers_for(
+            provider, provider_settings, fallback_model, conversation_budget_policy
+        ):
+            def post_turn_maintenance(
+                user_prompt,
+                current_session,
+                current_transcript,
+                current_runtime,
+            ) -> SessionRuntime:
+                return run_session_maintenance(
+                    provider=provider,
+                    settings=settings,
+                    fallback_model=fallback_model,
+                    prompt=user_prompt,
+                    session_store=session_store,
+                    session=current_session,
+                    transcript=current_transcript,
+                    runtime=current_runtime,
+                    conversation_budget_policy=conversation_budget_policy,
+                    trace_recorder=trace_recorder,
+                    warning_sink=_print_warning,
+                    status_sink=_print_status,
+                    hook_context=hook_context,
+                    provider_settings=provider_settings,
+                )
 
-        def task_turn_maintenance(
-            user_prompt,
-            final_text,
-            current_session,
-            current_runtime,
-        ) -> SessionRuntime | tuple[SessionRuntime, ExecuteLoopUpdate]:
-            if task_controller is None or task_controller.active_stage is None:
+            def task_turn_maintenance(
+                user_prompt,
+                final_text,
+                current_session,
+                current_runtime,
+            ) -> SessionRuntime | tuple[SessionRuntime, ExecuteLoopUpdate]:
+                if task_controller is None or task_controller.active_stage is None:
+                    return current_runtime
+                current_stage = task_controller.active_stage
+                update = _run_task_post_turn(
+                    provider=provider,
+                    settings=settings,
+                    fallback_model=fallback_model,
+                    task_store=task_controller.store,
+                    stage=current_stage,
+                    prompt=user_prompt,
+                    final_text=final_text,
+                    result=current_runtime.last_user_turn_result,
+                    trace_recorder=trace_recorder,
+                    session_id=current_session.session_id,
+                    provider_settings=provider_settings,
+                    turn_succeeded=True,
+                    achievement_required=current_stage == TaskStage.CHECKPOINT,
+                )
+                task_controller.finish_turn(current_stage)
+                if update is not None:
+                    return current_runtime, update
                 return current_runtime
-            current_stage = task_controller.active_stage
-            update = _run_task_post_turn(
-                provider=provider,
-                settings=settings,
-                fallback_model=maintenance_fallback_model,
-                task_store=task_controller.store,
-                stage=current_stage,
-                prompt=user_prompt,
-                final_text=final_text,
-                result=current_runtime.last_user_turn_result,
-                trace_recorder=trace_recorder,
-                session_id=current_session.session_id,
-                provider_settings=provider_settings,
-                turn_succeeded=True,
-                achievement_required=current_stage == TaskStage.CHECKPOINT,
+
+            return post_turn_maintenance, task_turn_maintenance
+
+        post_turn_maintenance, task_turn_maintenance = maintenance_handlers_for(
+            provider, provider_settings, maintenance_fallback_model, conversation_budget_policy
+        )
+
+        def on_tui_model_change(state):
+            active_settings = settings.provider(state.provider_name)
+            fallback = (
+                active_settings.primary_model()
+                if active_settings.name == DEEPSEEK_PROVIDER_NAME
+                else state.model
             )
-            task_controller.finish_turn(current_stage)
-            if update is not None:
-                return current_runtime, update
-            return current_runtime
+            state.maintenance_handler, state.task_maintenance_handler = maintenance_handlers_for(
+                state.provider, active_settings, fallback, state.conversation_budget_policy
+            )
+            if make_subagent_executor is not None:
+                state.subagents = make_subagent_executor(
+                    provider=state.provider,
+                    provider_settings=active_settings,
+                    model=state.model,
+                    options=state.options,
+                )
 
         def context_snapshot_for(profile_ref, model_override: str | None = None):
             return _profile_context_snapshot(
@@ -1614,15 +1639,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if request_report.pressure_ratio < _local_context_prepare_ratio(preset):
                 state.runtime = state.runtime.with_refreshed_context(local_snapshot)
                 return False
-            provider_for_summary = state.remote_provider or provider
-            if isinstance(provider_for_summary, _MissingApiKeyProvider):
+            if state.local_provider is None:
                 state.runtime = state.runtime.with_refreshed_context(local_snapshot)
                 return False
             try:
-                state.runtime = force_session_summary_checkpoint(
-                    provider=provider_for_summary,
+                summarized = force_session_summary_checkpoint(
+                    provider=state.local_provider,
                     settings=settings,
-                    fallback_model=remote_provider_settings.primary_model(),
+                    fallback_model=preset.runtime_name,
                     session_store=state.session_store,
                     session=state.session,
                     transcript=state.transcript,
@@ -1633,12 +1657,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     status_sink=_print_status,
                     hook_context=state.hook_context,
                     reason="before_local_model_switch",
-                    provider_settings=remote_provider_settings,
+                    provider_settings=settings.provider(LOCAL_PROVIDER_NAME),
                 )
             except Exception:
                 state.runtime = state.runtime.with_refreshed_context(local_snapshot)
                 return False
-            state.runtime = state.runtime.with_conversation(
+            if summarized is state.runtime:
+                state.runtime = state.runtime.with_refreshed_context(local_snapshot)
+                return False
+            state.runtime = summarized.with_conversation(
                 runtime_conversation_from_store(
                     state.session_store,
                     state.session,
@@ -1778,6 +1805,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     mcp_tools=mcp_tools,
                 ),
                 local_context_prepare_callback=local_context_prepare,
+                model_change_callback=on_tui_model_change,
                 behavior_runtime=behavior_runtime,
                 initial_prompts=(prompt,) if prompt else (),
                 show_reasoning=args.show_reasoning,
@@ -3514,6 +3542,9 @@ def _local_status_text(settings: AppSettings, args: argparse.Namespace) -> str:
         f"- ollama_running: {str(status.running).lower()}",
         f"- available: {str(status.available).lower()}",
     ]
+    previous = LocalModelStateStore(settings.data_dir).load()
+    if previous is not None:
+        lines.append(f"- last_prepare: {previous.user_message()}")
     if status.version:
         lines.append(f"- version: {status.version}")
     if prepared is not None:
@@ -4821,25 +4852,11 @@ def _read_session_trace_records(
     session_id: str,
     trace_kinds: Sequence[str] = (),
 ) -> tuple[Mapping[str, object], ...]:
-    if not trace_path.exists():
-        return ()
-    records: list[Mapping[str, object]] = []
-    with trace_path.open(encoding="utf-8") as file:
-        for line in file:
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(record, dict):
-                continue
-            if trace_record_matches_session(
-                record,
-                session_id,
-            ) and trace_record_matches_kinds(record, trace_kinds):
-                records.append(record)
-    return tuple(records)
+    return tuple(
+        record for record in iter_jsonl_objects(trace_path)
+        if trace_record_matches_session(record, session_id)
+        and trace_record_matches_kinds(record, trace_kinds)
+    )
 
 
 def _session_activity_note_path(
@@ -5117,8 +5134,9 @@ def _format_model_response_trace(
     cache_hit = _int_ref(refs, "cache_hit_input_tokens")
     cache_miss = _int_ref(refs, "cache_miss_input_tokens")
     cache_ratio = ""
-    if input_tokens > 0:
-        cache_ratio = f", cache_hit_ratio={cache_hit / input_tokens:.0%}"
+    ratio = reported_cache_hit_ratio(cache_hit, cache_miss)
+    if ratio is not None:
+        cache_ratio = f", cache_hit_ratio={ratio:.0%}"
     return (
         f"{recorded_at} {kind}: "
         f"model={refs.get('model', '-')}, step={refs.get('step', refs.get('turn', '-'))}, "
@@ -5563,6 +5581,14 @@ def _replace_skill_loader_tools(
     )
 
 
+def _default_mcp_schemas(
+    catalog: McpToolCatalog | None, model: str, context_tokens: int
+) -> tuple[Mapping[str, object], ...]:
+    if catalog is None or local_model_by_runtime_name(model) is not None:
+        return ()
+    return tuple(tool.schema() for tool in catalog.default_schema_tools(context_tokens))
+
+
 def _refresh_tui_skill_surface(
     state,
     *,
@@ -5594,6 +5620,11 @@ def _refresh_tui_skill_surface(
         capability_state_store=state.capability_state_store,
         mcp_catalog=mcp_catalog,
         model_context_tokens=model_context_tokens,
+    )
+    state.tool_schemas = (
+        *state.tool_schemas,
+        *_default_mcp_schemas(mcp_catalog, state.model, model_context_tokens),
+        *(state.subagents.schemas() if state.subagents is not None else ()),
     )
 
 
@@ -5967,11 +5998,13 @@ def _resolve_subagent_model(
             "subagent_worker",
             fallback_model,
             option_overrides=parent_options,
+            provider=provider_settings,
         )
     return resolve_model_purpose(
         settings,
         "subagent_worker",
         fallback_model,
+        provider=provider_settings,
     )
 
 
@@ -5980,7 +6013,7 @@ def _provider_has_dedicated_internal_models(
 ) -> bool:
     if provider_settings is None:
         return True
-    return provider_settings.name in {"deepseek", LOCAL_PROVIDER_NAME}
+    return provider_settings.name == DEEPSEEK_PROVIDER_NAME
 
 
 def _provider_model_context_tokens(
@@ -6201,6 +6234,10 @@ def _run_task_update(
         result = generate_task_update(
             provider,
             model=model_config.model,
+            options=model_config.options,
+            capabilities=_provider_model_capabilities(
+                settings, provider_settings, model_config.model
+            ),
             stage=stage,
             documents=documents,
             user_prompt=prompt,
@@ -6359,6 +6396,7 @@ def _run_task_post_turn(
             execute_turns=turns,
             last_reason=evaluation.reason,
             next_instruction=evaluation.next_instruction,
+            contract_status=evaluation.contract_status,
         )
         trace_recorder.record(
             TraceEvent(
@@ -6381,17 +6419,35 @@ def _run_task_post_turn(
             provider=provider_settings,
         )
         state = task_store.read_state()
-        evaluation = evaluate_execute_progress(
-            provider,
-            model=model_config.model,
-            documents=documents,
-            evidence=evidence_from_result(
-                user_prompt=prompt,
-                result=result,
-                final_answer=final_text,
-            ),
-            state=state,
-        )
+        try:
+            evaluation = evaluate_execute_progress(
+                provider,
+                model=model_config.model,
+                options=model_config.options,
+                capabilities=_provider_model_capabilities(
+                    settings, provider_settings, model_config.model
+                ),
+                documents=documents,
+                evidence=evidence_from_result(
+                    user_prompt=prompt,
+                    result=result,
+                    final_answer=final_text,
+                ),
+                state=state,
+            )
+        except (ProviderError, ValueError) as exc:
+            trace_recorder.record(
+                TraceEvent(
+                    kind="task_execute_evaluation_failed",
+                    summary="Could not verify this execute turn.",
+                    refs=(f"session_id={session_id}", f"reason={type(exc).__name__}"),
+                )
+            )
+            evaluation = ExecuteEvaluation(
+                decision=ExecuteDecision.BLOCKED,
+                reason="The evaluator could not verify this turn.",
+                next_instruction="Review the work and run /task execute to retry verification.",
+            )
         turns = (state.execute_turns if state is not None else 0) + 1
         task_store.save_state(
             TaskStage.EXECUTE,
@@ -6400,6 +6456,7 @@ def _run_task_post_turn(
             execute_turns=turns,
             last_reason=evaluation.reason,
             next_instruction=evaluation.next_instruction,
+            contract_status=evaluation.contract_status,
         )
         update = loop_update_from_evaluation(evaluation, turns=turns)
         trace_recorder.record(

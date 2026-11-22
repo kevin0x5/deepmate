@@ -312,7 +312,6 @@ def _tool_run_summary(
     total = len(messages)
     errors = sum(1 for message in messages if message.status in {"error", "approval required"})
     compacted = sum(1 for message in messages if message.status == "compacted")
-    successes = sum(1 for message in messages if message.status in {"ok", "compacted"})
     counts: dict[str, int] = {}
     first_errors: list[str] = []
     for message in messages:
@@ -323,7 +322,7 @@ def _tool_run_summary(
     if final_present:
         lines.append("Intermediate tool output was folded because a final answer was produced.")
         if errors:
-            lines.append(f"{errors} intermediate attempts failed; details are in /detail.")
+            lines.append(f"{errors} intermediate attempts failed.")
     elif errors:
         lines.append(f"{errors} failed.")
     if compacted:
@@ -427,11 +426,9 @@ def _tool_summary(
     status = _tool_status(result)
     if status == "ok":
         lines.append(_success_summary(name, arguments, result))
-        if _has_detail(result):
-            lines.append("Use /detail to view the latest tool output.")
     elif status == "compacted":
         lines.append(_success_summary(name, arguments, result))
-        lines.append("Output folded for context. Use /detail to view available detail.")
+        lines.append("Output folded for context.")
     elif status == "approval required":
         lines.append(_tool_error_summary(result.content, fallback="Approval is required before this can run."))
     else:
@@ -447,7 +444,12 @@ def _success_summary(
     result: ModelToolResult,
 ) -> str:
     if name in {"write_text_file", "edit_text_file"}:
-        return _write_success_summary(name, result)
+        return _write_success_summary(result)
+    if name == "read_text_file":
+        path = result.data.get("path") or arguments.get("path")
+        if isinstance(path, str) and path:
+            count = result.data.get("chars_read")
+            return f"{path}  ·  {count} 字符" if isinstance(count, int) else path
     if name == "load_browser_tools":
         count = result.data.get("schema_count")
         return (
@@ -455,25 +457,21 @@ def _success_summary(
             if isinstance(count, int)
             else "Browser tools loaded."
         )
-    arg_summary = _argument_summary(arguments)
     content = _first_meaningful_line(result.content, limit=160)
     if content:
-        return f"Completed.\n{content}"
-    if arg_summary:
-        return f"Completed: {arg_summary}"
-    return "Completed."
+        return content
+    return _argument_summary(arguments)
 
 
-def _write_success_summary(name: str, result: ModelToolResult) -> str:
+def _write_success_summary(result: ModelToolResult) -> str:
     path = result.data.get("path")
-    label = "Edited" if name == "edit_text_file" else "Wrote"
     diff = result.data.get("diff")
     stat = _diff_line_stat(diff)
     target = path if isinstance(path, str) and path.strip() else "file"
-    head = f"✓ {label} {target}" + (f" ({stat})" if stat else "") + "."
+    head = f"{target}  ·  {stat}" if stat else target
     if not isinstance(diff, str) or not diff.strip():
         return head
-    return f"{head}\n{_inline_diff_summary(diff)}\nFull diff is available in /detail."
+    return f"{head}\n{_inline_diff_summary(diff)}"
 
 
 def _diff_line_stat(diff: object) -> str:
@@ -492,8 +490,10 @@ def _diff_line_stat(diff: object) -> str:
     return f"+{added} -{removed}"
 
 
-def _inline_diff_summary(diff: str, *, limit: int = 20) -> str:
+def _inline_diff_summary(diff: str, *, limit: int = 10) -> str:
     lines = diff.strip().splitlines()
+    if len(lines) >= 2 and lines[0].startswith("--- ") and lines[1].startswith("+++ "):
+        lines = lines[2:]
     if not lines:
         return "Diff is available in /detail."
     visible = lines[:limit]
@@ -531,10 +531,6 @@ def _tool_status(result: ModelToolResult | None) -> str:
     if _compacted_ref(result.refs):
         return "compacted"
     return "ok"
-
-
-def _has_detail(result: ModelToolResult) -> bool:
-    return bool(result.content.strip() or result.data or result.refs)
 
 
 def _requires_approval(result: ModelToolResult) -> bool:

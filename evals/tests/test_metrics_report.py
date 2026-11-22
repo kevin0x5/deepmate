@@ -4,8 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from evals.loader import EvalConfigurationError
-from evals.metrics import aggregate_metrics, compare_runs
+from deepmate.providers import ModelRequest, ModelResponse, TokenUsage
+from deepmate.runtime.agent_loop import AgentStepResult, UserTurnResult
+
+from evals.loader import CASES_ROOT, EvalConfigurationError, load_case
+from evals.metrics import aggregate_metrics, compare_runs, trial_metrics
 from evals.model import (
     EvalCaseResult,
     EvalGrade,
@@ -18,6 +21,26 @@ from evals.report import load_run, write_run_artifacts
 
 
 class EvalMetricsReportTests(unittest.TestCase):
+    def test_mixed_cache_reporting_prices_all_input_and_flags_missing_usage(self) -> None:
+        case = load_case(CASES_ROOT / "context" / "dm-cxt-prefix-stability-001.yaml")
+        pricing = {"input_per_million": 10, "cache_hit_input_per_million": 1,
+                   "output_per_million": 20, "source": "test", "effective_at": "2026-01-01"}
+        request = ModelRequest(model="fixture", conversation=())
+
+        def metrics(*usage):
+            steps = tuple(AgentStepResult(request, ModelResponse(usage=value)) for value in usage)
+            return trial_metrics(case, UserTurnResult(steps), elapsed_seconds=1, schema_tokens=0, pricing=pricing)
+
+        cached = TokenUsage(input_tokens=100, cache_hit_input_tokens=80, cache_miss_input_tokens=20)
+        complete = metrics(cached, TokenUsage(input_tokens=100))
+        self.assertTrue(complete.priced)
+        self.assertEqual(complete.values["cache_hit_ratio"], 0.8)
+        self.assertAlmostEqual(complete.values["cost"], (80 + 120 * 10) / 1_000_000)
+        missing = metrics(cached, None)
+        self.assertIsNone(missing.values["cost"])
+        self.assertIsNone(missing.values["input_tokens"])
+        self.assertIsNone(missing.values["token_per_second"])
+
     def test_aggregate_reports_reliability_safety_cache_and_unpriced_cost(self) -> None:
         results = tuple(
             _result("dm-a-001", index, True)

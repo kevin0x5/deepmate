@@ -160,14 +160,10 @@ def pet_runtime_ui_dir(data_dir: str | Path | None) -> Path:
 
 
 def _pet_ui_dir(data_dir: str | Path | None = None) -> Path:
-    runtime = pet_runtime_ui_dir(data_dir)
-    if _local_electron_binary(runtime) is not None and (runtime / "electron" / "main.js").exists():
-        return runtime
+    """Use this Deepmate version's UI with an already installed Electron binary."""
     if (PET_UI_DIR / "electron" / "main.js").exists():
         return PET_UI_DIR
-    if (runtime / "electron" / "main.js").exists():
-        return runtime
-    return PET_UI_DIR
+    return pet_runtime_ui_dir(data_dir)
 
 
 def _electron_binary(data_dir: str | Path | None = None) -> Path | None:
@@ -185,11 +181,9 @@ def _electron_and_ui_dir(data_dir: str | Path | None = None) -> tuple[Path, Path
         pet_runtime_ui_dir(data_dir),
         PET_UI_DIR,
     ):
-        if not (ui_dir / "electron" / "main.js").exists():
-            continue
         local = _local_electron_binary(ui_dir)
         if local is not None:
-            return local, ui_dir
+            return local, _pet_ui_dir(data_dir)
     return None
 
 

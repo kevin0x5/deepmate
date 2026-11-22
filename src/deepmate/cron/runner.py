@@ -21,6 +21,7 @@ from deepmate.cron.model import (
 from deepmate.cron.planner import mark_needs_approval, resolve_output_dir
 from deepmate.cron.schedule import is_due, next_run_at
 from deepmate.cron.store import CronJobStore
+from deepmate.storage.atomic import atomic_write_text
 
 
 def run_due_jobs(
@@ -39,9 +40,10 @@ def run_due_jobs(
             continue
         if not is_due(job.state.next_run_at):
             continue
-        reports.append(
-            _run_one(job, store=store, python_executable=python_executable)
-        )
+        with store.run_lock(job.id):
+            current = store.find(job.id)
+            if current is not None and current.enabled and is_due(current.state.next_run_at):
+                reports.append(_run_one(current, store=store, python_executable=python_executable))
     if not reports:
         return "No cron jobs due."
     return "\n".join(reports)
@@ -87,8 +89,9 @@ def run_job_now(
 ) -> str:
     """Run one job immediately, regardless of next_run_at."""
     store = CronJobStore(workspace)
-    job = store.get(job_id)
-    return _run_one(job, store=store, python_executable=python_executable)
+    with store.run_lock(job_id):
+        job = store.get(job_id)
+        return _run_one(job, store=store, python_executable=python_executable)
 
 
 def _run_one(
@@ -121,7 +124,8 @@ def _run_one(
                     output=output,
                     error="needs approval",
                 ),
-            )
+            ),
+            expected=job,
         )
         return f"{job.id}: blocked (needs approval) -> {output}"
     if _uses_unavailable_runtime_permissions(job):
@@ -149,7 +153,8 @@ def _run_one(
                     output=output,
                     error="unsupported background permission",
                 ),
-            )
+            ),
+            expected=job,
         )
         return f"{job.id}: blocked (unsupported permission) -> {output}"
     prompt = _runner_prompt(job)
@@ -197,7 +202,8 @@ def _run_one(
                     output=output,
                     error=str(exc),
                 ),
-            )
+            ),
+            expected=job,
         )
         return f"{job.id}: failed -> {output}"
     content = (result.stdout or "").strip()
@@ -220,7 +226,8 @@ def _run_one(
                 output=output,
                 error="" if result.returncode == 0 else f"exit_code={result.returncode}",
             ),
-        )
+        ),
+        expected=job,
     )
     return f"{job.id}: {status} -> {output}"
 
@@ -253,7 +260,7 @@ def _write_status_output(
     output_dir.mkdir(parents=True, exist_ok=True)
     file_name = _render_filename(job, status=status)
     path = output_dir / file_name
-    path.write_text(body.rstrip() + "\n", encoding="utf-8")
+    atomic_write_text(path, body.rstrip() + "\n")
     try:
         return str(path.resolve().relative_to(workspace.resolve()))
     except ValueError:

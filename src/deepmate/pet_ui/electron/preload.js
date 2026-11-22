@@ -1,6 +1,9 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('deepmatePet', {
+  onPortraits(callback) {
+    ipcRenderer.on('pet-portraits', (_event, portraits) => callback(portraits));
+  },
   onState(callback) {
     ipcRenderer.on('pet-state', (_event, state) => callback(state));
   },

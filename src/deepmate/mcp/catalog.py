@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +12,13 @@ from deepmate.domain import CapabilityKind, CapabilityRef
 from deepmate.foundation import compact_text
 from deepmate.mcp.client import create_mcp_client
 from deepmate.mcp.spec import McpExposure, McpServerSpec, McpToolRef
-from deepmate.mcp.state import DEFAULT_MCP_IDLE_DAYS, McpUsageStateStore
+from deepmate.mcp.state import (
+    DEFAULT_MCP_IDLE_DAYS,
+    McpUsageEntry,
+    McpUsageStateStore,
+    mcp_server_key,
+    mcp_tool_key,
+)
 
 MCP_SCHEMA_PRELOAD_RATIO = 0.01
 MCP_COMPACT_SURFACE_RATIO = 0.002
@@ -52,16 +58,16 @@ class McpToolCatalog:
 
     def read_only_tools(self) -> tuple[McpToolRef, ...]:
         """Return all discovered read-only tools."""
-        return tuple(
-            tool
-            for inventory in self.inventories
-            for tool in inventory.read_only_tools()
-        )
+        return tuple(self._iter_read_only_tools())
+
+    def _iter_read_only_tools(self) -> Iterator[McpToolRef]:
+        for inventory in self.inventories:
+            yield from (tool for tool in inventory.tools if tool.is_read_only())
 
     def get_tool(self, qualified_name: str) -> McpToolRef | None:
         """Return one read-only tool by qualified name."""
         clean_name = qualified_name.strip()
-        for tool in self.read_only_tools():
+        for tool in self._iter_read_only_tools():
             if tool.qualified_name() == clean_name:
                 return tool
         return None
@@ -76,7 +82,7 @@ class McpToolCatalog:
         clean_query = query.strip().lower()
         clean_server = server_name.strip()
         matches: list[McpToolRef] = []
-        for tool in self.read_only_tools():
+        for tool in self._iter_read_only_tools():
             if clean_server and tool.server_name != clean_server:
                 continue
             haystack = " ".join(
@@ -89,7 +95,9 @@ class McpToolCatalog:
             if clean_query and clean_query not in haystack:
                 continue
             matches.append(tool)
-        return tuple(matches[: max(1, limit)])
+            if len(matches) >= max(1, limit):
+                break
+        return tuple(matches)
 
     def default_schema_tools(self, model_context_tokens: int) -> tuple[McpToolRef, ...]:
         """Return MCP tools whose full schema should be preloaded by default."""
@@ -98,8 +106,6 @@ class McpToolCatalog:
         used = 0
         for tool in self._schema_preload_candidates():
             cost = _estimate_tool_schema_tokens(tool.schema())
-            if used + cost > budget and selected:
-                continue
             if used + cost > budget:
                 continue
             selected.append(tool)
@@ -114,10 +120,12 @@ class McpToolCatalog:
             int(max(1, model_context_tokens) * MCP_COMPACT_SURFACE_RATIO),
         )
         tool_budget_used = 0
+        needs_tiers = any(inv.server.exposure == McpExposure.SEARCHABLE for inv in self.inventories)
+        entries = self.state_store.load() if self.state_store and needs_tiers else {}
         for inventory in self.inventories:
-            tier = self.server_tier(inventory.server)
             if inventory.server.exposure == McpExposure.MANUAL:
                 continue
+            tier = self._server_tier(inventory.server, entries)
             refs.append(self._server_ref(inventory, tier))
             for tool in inventory.read_only_tools():
                 ref = _tool_name_ref(tool) if tier == "idle" else _tool_ref(tool)
@@ -130,11 +138,14 @@ class McpToolCatalog:
 
     def server_tier(self, server: McpServerSpec) -> str:
         """Return active or idle for default MCP context injection."""
+        if server.exposure == McpExposure.ALWAYS_ON or self.state_store is None:
+            return "active"
+        return self._server_tier(server, self.state_store.load())
+
+    def _server_tier(self, server: McpServerSpec, entries: Mapping[str, McpUsageEntry]) -> str:
         if server.exposure == McpExposure.ALWAYS_ON:
             return "active"
-        if self.state_store is None:
-            return "active"
-        entry = self.state_store.server_entry(server.name)
+        entry = entries.get(mcp_server_key(server.name))
         if entry is None:
             return "active"
         if entry.is_idle(_normal_datetime(self.now), idle_days=self.idle_days):
@@ -169,16 +180,23 @@ class McpToolCatalog:
         if self.state_store is None:
             return ()
         entries = self.state_store.load()
-        tools_by_name = {tool.qualified_name(): tool for tool in self.read_only_tools()}
+        now = _normal_datetime(self.now)
         recent: list[tuple[str, McpToolRef]] = []
-        for qualified_name, tool in tools_by_name.items():
-            if qualified_name in seen:
+        for inventory in self.inventories:
+            server = inventory.server
+            if server.exposure != McpExposure.SEARCHABLE or self._server_tier(server, entries) == "idle":
                 continue
-            entry = entries.get(f"mcp_tool:{qualified_name}")
-            if entry is None or not entry.last_used_at.strip():
-                continue
-            recent.append((entry.last_used_at, tool))
-        return tuple(tool for _, tool in sorted(recent, reverse=True))
+            for tool in inventory.read_only_tools():
+                name = tool.qualified_name()
+                entry = entries.get(mcp_tool_key(name))
+                if name in seen or entry is None or not entry.last_used_at:
+                    continue
+                if not entry.is_idle(now, idle_days=self.idle_days):
+                    recent.append((entry.last_used_at, tool))
+                    seen.add(name)
+        # Discovery order is the stable tie-breaker for equal use timestamps.
+        recent.sort(key=lambda item: item[0], reverse=True)
+        return tuple(tool for _, tool in recent)
 
     def _server_ref(self, inventory: McpServerInventory, tier: str) -> CapabilityRef:
         server = inventory.server

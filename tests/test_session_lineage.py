@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,9 +24,32 @@ from deepmate.storage import (
     ToolOutputStore,
     TurnCheckpointStore,
 )
+from deepmate.storage.session_store import _existing_jsonl_max_sequence
 
 
 class SessionLineageTests(unittest.TestCase):
+    def test_append_reuses_sequence_and_recovers_after_another_writer_or_rewind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session = _store_with_session(Path(tmp), "Shared")
+            first = store.transcript_store(session)
+            second = store.transcript_store(session)
+            item = _message_item(MessageRole.USER, "a\u2028b")
+            with patch(
+                "deepmate.storage.session_store._existing_jsonl_max_sequence",
+                wraps=_existing_jsonl_max_sequence,
+            ) as scan:
+                self.assertEqual([first.append_item(item).sequence for _ in range(3)], [1, 2, 3])
+                self.assertEqual(scan.call_count, 1)
+                self.assertEqual(second.append_item(item).sequence, 4)
+                self.assertEqual(first.append_item(item).sequence, 5)
+                second.truncate_after(1)
+                self.assertEqual(first.append_item(item).sequence, 2)
+            with first.path.open("ab") as file:
+                file.write(b'\xff\n{"sequence":12}\n{"sequence":9}')
+            self.assertEqual(first.append_item(item).sequence, 13)
+            self.assertEqual([record.sequence for record in first.load_records()], [1, 2, 13])
+            self.assertEqual(first.load_items_after(2), (item,))
+
     def test_old_session_metadata_still_loads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -168,6 +192,19 @@ class SessionLineageTests(unittest.TestCase):
             self.assertIsNotNone(record)
             self.assertEqual(record.sequence, 1)
             fsync.assert_called_once()
+
+    @unittest.skipUnless(os.name == "posix", "POSIX file permissions")
+    def test_transcript_is_private_on_creation_and_when_appending_to_an_older_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session = _store_with_session(Path(tmp), "Source")
+            transcript = store.transcript_store(session)
+            transcript.append_item(_message_item(MessageRole.USER, "first"))
+            self.assertEqual(transcript.path.stat().st_mode & 0o077, 0)
+
+            transcript.path.chmod(0o644)
+            transcript.append_item(_message_item(MessageRole.USER, "second"))
+            self.assertEqual(transcript.path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual([record.sequence for record in transcript.load_records()], [1, 2])
 
     def test_transcript_tool_result_attachments_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

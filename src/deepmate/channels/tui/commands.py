@@ -59,76 +59,79 @@ class TuiCommandResult:
 def command_suggestions() -> tuple[str, ...]:
     """Return the supported slash command names."""
     return (
-        "/commands - Show available TUI commands.",
-        "/status - Open runtime status in a content tab.",
-        "/task - Open Task Mode state in a content tab.",
-        "/diff - Open workspace diff summary and raw diff in a content tab.",
-        "/compose - Open a multiline draft panel.",
-        "/send - Send the multiline draft.",
-        "/cancel-compose - Clear the multiline draft.",
-        "/restore-draft - Restore the last unsent prompt draft.",
-        "/files [query] - Show matching workspace files for @ references.",
-        "/open <path> [--offset N] [--limit N] - Open a workspace file in a content tab.",
-        "/find <keyword> - Search the active content tab.",
-        "/workspace <folder> - Restart the TUI in another workspace.",
-        "/setup-key <api_key> - Save the model API key locally for this workspace.",
-        "/task plan <goal> - Create or update the Task Mode plan.",
-        "/task execute - Execute the current Task Mode plan.",
-        "/task status - Show Task Mode state and files.",
-        "/task checkpoint <note> - Save a Task Mode achievement checkpoint.",
-        "/cron add <schedule and job> - Create a workspace scheduled job draft.",
-        "/cron list|status|approve|pause|resume|remove - Manage scheduled jobs.",
-        "/qa <goal> - Create a QA Audit plan, cases, and permission preview.",
-        "/qa run|status|report|list - Run QA Audit and inspect reports.",
-        "/local - Prepare or switch to a local Qwen model.",
-        "/behavior - Show or change Deepmate interaction learning.",
-        "/computer on|off|status - Enable current-task Computer Use.",
-        "/model - Show or switch the model for future turns.",
-        "/model local - Switch future turns to the local model.",
-        "/model remote - Return future turns to the cloud model.",
-        "/model upgrade - Use the configured stronger model for future turns.",
-        "/model default - Return to the provider default model.",
-        "/search <query> - Search the public web.",
-        "/pet - Show desktop pet status and quick actions.",
-        "/pet on - Start the desktop pet window.",
-        "/pet setup - Install or repair the desktop pet Electron runtime.",
-        "/pet select dog|cat|squirrel|penguin - Select the desktop pet.",
-        "/pet learning off|low|standard - Set pet learning mode.",
-        "/pet bubble smart|frugal - Set pet bubble generation mode.",
-        "/deploy [path] - Create or show a temporary external preview link.",
-        "/deploy status|stop|replace - Manage the active preview.",
-        "/detail - Reopen the latest content tab.",
-        "/close-tab - Close the current content tab.",
-        "/followup <text> - Add text to the running turn at the next safe step.",
-        "/queue <text> - Queue text for the next turn.",
-        "/queue - Show prompts queued while the agent is running.",
-        "/resume-queue - Resume paused queued prompts.",
-        "/clear-queue - Clear queued prompts.",
-        "/approvals - Open approval history for this session.",
-        "/clear - Clear the visible chat display; transcript and context are kept.",
-        "/undo-clear - Restore the last cleared chat display.",
-        "/verbose - Toggle streaming of the model's reasoning in the live cell.",
-        "/trust - Auto-approve writes and shell for this session (use /trust off to revert).",
-        "/rewind [turn_id] [--apply] - Preview or apply checkpoint rewind.",
-        "/undo [turn_id] [--apply] - Alias for /rewind.",
-        "/session - Show current session.",
-        "/session tree - Show session lineage.",
-        "/session clone [title] - Clone the current session and switch to it.",
-        "/session fork <turn|sequence> [title] - Fork from a saved turn or sequence.",
-        "/tree, /clone, /fork - Short aliases for session lineage commands.",
-        "/remote - Show remote bindings.",
-        "/remote --wecom - Bind Enterprise WeChat to the current session.",
-        "/remote --open wecom - Let Enterprise WeChat take over this session.",
-        "/remote --close wecom - Return this session to local delivery.",
-        "/remote --unbind wecom - Remove Enterprise WeChat bindings.",
-        "/sessions - List sessions.",
-        "/resume <id> - Resume a session.",
-        "/title <title> - Rename current session.",
-        "/skills - Show skills.",
-        "/show-skill <name> - Show a skill.",
-        "/mcp - Show MCP servers.",
-        "/hooks status|validate|trust|reload - Manage hooks.",
-        "/exit, /quit - Exit TUI.",
+        "/commands - 列出可用命令",
+        "/status - 查看模型和上下文用量",
+        "/task - 查看当前任务",
+        "/diff - 查看工作区改动",
+        "/compose - 编辑多行草稿",
+        "/send - 发送草稿",
+        "/cancel-compose - 清空多行草稿",
+        "/restore-draft - 恢复上次草稿",
+        "/files [query] - 查找可引用的工作区文件",
+        "/open <path> [--offset N] [--limit N] - 打开文件，可按字节续读",
+        "/find <keyword> - 在当前页查找内容",
+        "/workspace <folder> - 切换工作区",
+        "/setup-key <api_key> - 为当前工作区保存模型密钥",
+        "/task plan <goal> - 创建或更新任务计划",
+        "/task execute - 执行当前任务计划",
+        "/task status - 查看任务状态和文件",
+        "/task checkpoint <note> - 保存任务检查点",
+        "/task clear - 清除当前任务的本地运行状态",
+        "/cron add <schedule and job> - 创建定时任务草稿",
+        "/cron list|status|approve|pause|resume|remove - 管理定时任务",
+        "/qa <goal> - 制定验收计划并查看所需权限",
+        "/qa run|status|report|list - 运行验收并查看报告",
+        "/local - 准备或切换本地模型",
+        "/local status - 查看安装状态、模型和体积",
+        "/behavior - 管理交互偏好",
+        "/computer on|off|status - 切换当前任务的电脑操作权限",
+        "/model - 查看或切换模型",
+        "/model local - 后续对话使用本地模型",
+        "/model remote - 后续对话使用云端模型",
+        "/model upgrade - 切换到已配置的增强模型",
+        "/model default - 恢复默认模型",
+        "/search <query> - 搜索公开网页",
+        "/pet - 查看桌宠和可用操作",
+        "/pet on - 打开桌宠窗口",
+        "/pet setup - 安装或修复桌宠运行环境",
+        "/pet select dog|cat|squirrel|penguin - 选择桌宠外观",
+        "/pet learning off|low|standard - 设置桌宠学习频率",
+        "/pet bubble smart|frugal - 设置气泡生成方式",
+        "/deploy [path] - 预览外部访问链接",
+        "/deploy status|stop|replace - 管理正在运行的预览",
+        "/detail - 重新打开最近的内容页",
+        "/close-tab - 关闭当前内容页",
+        "/followup <text> - 在下一个安全步骤补充要求",
+        "/queue <text> - 把提示加入下一轮队列",
+        "/queue - 查看待处理提示",
+        "/resume-queue - 继续暂停的队列",
+        "/clear-queue - 清空待处理提示",
+        "/approvals - 查看本会话的审批记录",
+        "/clear - 清空屏幕，保留对话记录",
+        "/undo-clear - 恢复刚清空的屏幕",
+        "/verbose - 切换思考过程显示",
+        "/trust - 切换本会话的写入和命令自动批准",
+        "/rewind [turn_id] [--apply] - 预览或恢复到检查点",
+        "/undo [turn_id] [--apply] - 恢复到检查点",
+        "/session - 查看当前会话",
+        "/new - 新建会话",
+        "/session tree - 查看会话之间的关系",
+        "/session clone [title] - 复制当前会话并切换",
+        "/session fork <turn|sequence> [title] - 从指定步骤创建分支会话",
+        "/tree, /clone, /fork - 会话分支快捷命令",
+        "/remote - 查看远程通道绑定",
+        "/remote --wecom - 绑定企业微信",
+        "/remote --open wecom - 将当前会话交给企业微信",
+        "/remote --close wecom - 回到本地接收消息",
+        "/remote --unbind wecom - 解除企业微信绑定",
+        "/sessions - 列出会话",
+        "/resume <id> - 恢复指定会话",
+        "/title <title> - 重命名当前会话",
+        "/skills - 查看可用技能",
+        "/show-skill <name> - 查看技能说明",
+        "/mcp - 查看 MCP 服务",
+        "/hooks status|validate|trust|reload - 管理运行钩子",
+        "/exit, /quit - 退出 TUI",
     )
 
 
@@ -534,7 +537,7 @@ def _handle_local_command(prompt: str, state: TuiRuntimeState) -> TuiCommandResu
                 ),
             ),
         )
-    preset = local_model_by_id(target) if target else recommended_local_model()
+    preset = (local_model_by_id(target) or local_model_by_runtime_name(target)) if target else recommended_local_model()
     if preset is None:
         choices = ", ".join(item.id for item in local_model_presets())
         return TuiCommandResult(
@@ -553,7 +556,7 @@ def _handle_local_command(prompt: str, state: TuiRuntimeState) -> TuiCommandResu
             TuiMessage(
                 kind="status",
                 title="/local",
-                body=f"正在准备本地模型：{preset.short_label}（{preset.label}）。",
+                body=f"正在准备本地模型 {preset.label}。首次下载约 {preset.size_label.removeprefix('about ')}，Esc 可取消。",
             ),
         ),
         local_prepare=LocalModelPrepareRequest(preset=preset, source="/local"),
@@ -578,11 +581,13 @@ def _handle_model_command(prompt: str, state: TuiRuntimeState) -> TuiCommandResu
     if lowered == "local" or lowered.startswith("local "):
         preset_name = target[5:].strip()
         preset = (
-            local_model_by_id(preset_name)
+            (local_model_by_id(preset_name) or local_model_by_runtime_name(preset_name))
             if preset_name
             else local_model_by_runtime_name(state.local_default_model)
             or local_model_by_id(state.local_default_model)
         )
+        if preset is None and preset_name:
+            return _handle_local_command(f"/local {preset_name}", state)
         if preset is None:
             preset = recommended_local_model()
         return TuiCommandResult(
@@ -591,7 +596,7 @@ def _handle_model_command(prompt: str, state: TuiRuntimeState) -> TuiCommandResu
                 TuiMessage(
                     kind="status",
                     title="/model",
-                    body=f"正在准备本地模型：{preset.short_label}（{preset.label}）。",
+                    body=f"正在准备本地模型 {preset.label}。首次下载约 {preset.size_label.removeprefix('about ')}，Esc 可取消。",
                 ),
             ),
             local_prepare=LocalModelPrepareRequest(preset=preset, source="/model local"),
@@ -654,6 +659,8 @@ def _handle_model_command(prompt: str, state: TuiRuntimeState) -> TuiCommandResu
             ),
         )
     state.model = selected
+    if state.model_change_callback is not None:
+        state.model_change_callback(state)
     return TuiCommandResult(
         True,
         messages=(
@@ -810,6 +817,11 @@ def _friendly_model_name(value: str) -> str:
 
 
 def _switch_to_local_model(state: TuiRuntimeState, preset: LocalModelPreset) -> bool:
+    if state.local_provider is None:
+        state.local_provider = ChatCompletionsProvider(
+            base_url=state.local_provider_base_url,
+            api_key=state.local_provider_api_key,
+        )
     context_prepared = False
     if state.local_context_prepare_callback is not None:
         try:
@@ -827,11 +839,6 @@ def _switch_to_local_model(state: TuiRuntimeState, preset: LocalModelPreset) -> 
         state.remote_options = dict(state.options)
         state.remote_model_capabilities = state.model_capabilities
         state.remote_conversation_budget_policy = state.conversation_budget_policy
-    if state.local_provider is None:
-        state.local_provider = ChatCompletionsProvider(
-            base_url=state.local_provider_base_url,
-            api_key=state.local_provider_api_key,
-        )
     state.provider = state.local_provider
     state.provider_name = LOCAL_PROVIDER_NAME
     state.provider_api_key_env = "DEEPMATE_LOCAL_API_KEY"
@@ -850,7 +857,9 @@ def _switch_to_local_model(state: TuiRuntimeState, preset: LocalModelPreset) -> 
         state.tool_output_compactor = state.tool_output_compactor.with_policy(
             state.conversation_budget_policy
         )
-    state.runtime_stats.model_context_tokens = preset.effective_context_tokens
+    state.runtime_stats.reset_model_usage(preset.effective_context_tokens)
+    if state.model_change_callback is not None:
+        state.model_change_callback(state)
     if state.refresh_skill_surface_callback is not None:
         state.refresh_skill_surface_callback(state)
     return context_prepared
@@ -958,6 +967,10 @@ def _switch_to_remote_model(state: TuiRuntimeState) -> None:
     state.options = dict(state.remote_options)
     state.model_capabilities = state.remote_model_capabilities
     state.conversation_budget_policy = state.remote_conversation_budget_policy
+    policy = state.conversation_budget_policy
+    state.runtime_stats.reset_model_usage(policy.model_context_tokens if policy else None)
+    if state.model_change_callback is not None:
+        state.model_change_callback(state)
     if state.tool_output_compactor is not None:
         state.tool_output_compactor = state.tool_output_compactor.with_policy(
             state.conversation_budget_policy
@@ -1004,22 +1017,25 @@ def _local_status(state: TuiRuntimeState | None = None) -> str:
         prepare_state = LocalModelStateStore(state.data_dir).load()
         if prepare_state is not None:
             lines.append(f"- 上次准备：{prepare_state.user_message()}")
+    names = set()
     if status.running:
         suffix = f" ({status.version})" if status.version else ""
-        lines.append(f"- local runtime: ready{suffix}")
+        lines.append(f"- Ollama 已连接{suffix}")
+        names = {name.lower() for name in runtime.installed_models()}
     elif status.installed:
-        lines.append("- local runtime: installed, not running")
+        lines.append("- 已安装 Ollama。启动服务后输入 /local 继续。")
     else:
-        lines.append("- local runtime: not installed")
-        lines.append("- install Ollama once, then run /local again")
-    lines.append("")
-    lines.append("Models")
+        lines.append("- 尚未连接 Ollama，可从 https://ollama.com/download 安装。")
+    lines.extend(("", "可用预设"))
     recommended = recommended_local_model()
     for preset in local_model_presets():
-        marker = "推荐" if preset.id == recommended.id else preset.size_label
-        lines.append(f"- {preset.short_label}: {preset.label} ({marker})")
-    if status.message:
-        lines.extend(("", status.message))
+        installed = preset.runtime_name.lower() in names or preset.ollama_ref.lower() in names
+        markers = [f"约 {preset.size_label.removeprefix('about ')}"]
+        if installed:
+            markers.append("已安装")
+        if preset.id == recommended.id:
+            markers.append("推荐")
+        lines.append(f"- {preset.label}（{' · '.join(markers)}）  /local {preset.short_label}")
     return "\n".join(lines)
 
 
@@ -1439,37 +1455,27 @@ def _captured_output(stdout: str, stderr: str) -> str:
 def _commands_preview() -> str:
     suggestions = command_suggestions()
     groups = (
-        ("Common", ("/commands", "/status", "/diff", "/open", "/find")),
-        ("Sessions", ("/session", "/sessions", "/resume", "/title", "/new")),
-        ("Files", ("/files", "/open", "/find", "/close-tab")),
-        ("Queue", ("/followup", "/queue", "/resume-queue", "/clear-queue")),
-        ("Drafts", ("/compose", "/send", "/cancel-compose", "/restore-draft")),
-        (
-            "Task",
-            (
-                "/task",
-                "/task plan",
-                "/task execute",
-                "/task status",
-                "/task checkpoint",
-                "/task clear",
-            ),
-        ),
-        ("QA", ("/qa",)),
-        ("Remote", ("/remote", "/deploy")),
-        ("Tools", ("/skills", "/show-skill", "/mcp", "/hooks")),
-        ("Model", ("/model",)),
-        ("Pet", ("/pet",)),
-        ("Exit", ("/exit", "/quit")),
+        ("常用", ("/commands", "/status", "/diff", "/open", "/find")),
+        ("会话", ("/session", "/sessions", "/resume", "/title", "/new")),
+        ("文件", ("/files", "/open", "/find", "/close-tab", "/workspace", "/detail")),
+        ("队列", ("/followup", "/queue", "/resume-queue", "/clear-queue")),
+        ("草稿", ("/compose", "/send", "/cancel-compose", "/restore-draft")),
+        ("任务", ("/task",)),
+        ("验收", ("/qa",)),
+        ("远程和预览", ("/remote", "/deploy")),
+        ("工具", ("/skills", "/show-skill", "/mcp", "/hooks")),
+        ("模型", ("/model", "/local", "/setup-key")),
+        ("桌宠", ("/pet",)),
+        ("退出", ("/exit", "/quit")),
     )
-    lines = ["Command palette", "", "Most used: /status  /diff  /open  /find  /task  /qa"]
+    lines = ["命令列表"]
     seen: set[str] = set()
     for title, prefixes in groups:
         entries = [
             item
             for item in suggestions
             if item not in seen
-            and any(item.startswith(prefix) for prefix in prefixes)
+            and item.split(maxsplit=1)[0].rstrip(",") in prefixes
         ]
         if not entries:
             continue
@@ -1478,11 +1484,8 @@ def _commands_preview() -> str:
         seen.update(entries)
     remaining = [item for item in suggestions if item not in seen]
     if remaining:
-        lines.extend(("", "Other"))
+        lines.extend(("", "其他"))
         lines.extend(f"  {entry}" for entry in remaining)
-    lines.append("")
-    lines.append("Task Mode uses /task plan for the task contract and /task execute for the execution loop.")
-    lines.append("Use /task status to inspect runtime state, /task checkpoint to save a manual achievement, and /task clear to clear local runtime state.")
     return "\n".join(lines)
 
 

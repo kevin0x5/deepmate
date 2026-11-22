@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
 from deepmate.domain import Message, MessageRole
 from deepmate.providers import (
+    ModelCapabilities,
     ModelConversationItem,
     ModelProvider,
     ModelRequest,
     ModelToolResult,
 )
 from deepmate.runtime.agent_loop import UserTurnResult
-from deepmate.tasks.json_helpers import strip_fenced_json
+from deepmate.tasks.json_helpers import (
+    contract_status_items,
+    strip_fenced_json,
+    task_request_options,
+)
 from deepmate.tasks.render import TaskDocuments, extract_recent_timeline
 from deepmate.tasks.store import TaskModeState
 
@@ -85,6 +92,7 @@ Return one JSON object only, without markdown fences:
 Rules:
 - Do not run tools or invent evidence.
 - achieved requires credible evidence that every acceptance-contract item is done.
+- For achieved, leave next_instruction empty.
 - continue when work can proceed without user input.
 - blocked when missing information, permission, external state, or user decision prevents progress.
 - budget_limited only when the supplied runtime budget is exhausted.
@@ -120,6 +128,8 @@ def evaluate_execute_progress(
     evidence: ExecuteEvidence,
     state: TaskModeState | None = None,
     turn_budget: int = DEFAULT_EXECUTE_TURN_BUDGET,
+    options: Mapping[str, object] | None = None,
+    capabilities: ModelCapabilities | None = None,
 ) -> ExecuteEvaluation:
     """Evaluate one execute turn against the task contract."""
     turns = (state.execute_turns if state is not None else 0) + 1
@@ -150,7 +160,8 @@ def evaluate_execute_progress(
                     )
                 ),
             ),
-            options={"temperature": 0, "max_tokens": 700},
+            options=task_request_options(options, max_tokens=700),
+            capabilities=capabilities or ModelCapabilities(),
         )
         response = provider.complete(request)
         evaluation = parse_execute_evaluation(response.content)
@@ -175,7 +186,7 @@ def heuristic_execute_evaluation(
     evidence: ExecuteEvidence,
 ) -> ExecuteEvaluation:
     """Conservative deterministic fallback when no evaluator is available."""
-    text = "\n".join((documents.plan, evidence.final_answer)).lower()
+    text = evidence.final_answer.lower()
     blocked_markers = (
         "blocked",
         "阻塞",
@@ -190,13 +201,14 @@ def heuristic_execute_evaluation(
             reason="The latest evidence reports a blocker or required user decision.",
             next_instruction="Ask the user for the missing decision or input.",
         )
-    if _all_acceptance_items_checked(documents.plan) and _has_verification_evidence(
-        text
+    if (
+        not evidence.errors
+        and _all_acceptance_items_checked(documents.plan)
+        and _has_verification_evidence(text)
     ):
         return ExecuteEvaluation(
             decision=ExecuteDecision.ACHIEVED,
             reason="All visible acceptance items are checked and verification evidence is present.",
-            next_instruction="Create the final achievement and close execute.",
         )
     return ExecuteEvaluation(
         decision=ExecuteDecision.CONTINUE,
@@ -208,23 +220,21 @@ def heuristic_execute_evaluation(
 def parse_execute_evaluation(content: str) -> ExecuteEvaluation:
     """Parse evaluator JSON output."""
     payload = _parse_json_object(content)
-    decision = ExecuteDecision.CONTINUE
-    raw_decision = str(payload.get("decision", "")).strip().lower()
-    for candidate in ExecuteDecision:
-        if raw_decision == candidate.value:
-            decision = candidate
-            break
-    raw_status = payload.get("contract_status")
-    contract_status = (
-        tuple(str(item).strip() for item in raw_status if str(item).strip())
-        if isinstance(raw_status, list)
-        else ()
-    )
+    try:
+        decision = ExecuteDecision(str(payload.get("decision", "")).strip().lower())
+    except ValueError as exc:
+        raise ValueError("execute evaluator returned an unrecognized decision") from exc
+    reason = payload.get("reason")
+    instruction = payload.get("next_instruction")
     return ExecuteEvaluation(
         decision=decision,
-        reason=str(payload.get("reason", "")).strip(),
-        next_instruction=str(payload.get("next_instruction", "")).strip(),
-        contract_status=contract_status,
+        reason=reason.strip() if isinstance(reason, str) else "",
+        next_instruction=(
+            instruction.strip()
+            if decision != ExecuteDecision.ACHIEVED and isinstance(instruction, str)
+            else ""
+        ),
+        contract_status=contract_status_items(payload.get("contract_status")),
     )
 
 
@@ -279,8 +289,10 @@ def execute_start_prompt(user_prompt: str) -> str:
     return base if not extra else f"{base}\n\nUser execution note:\n{extra}"
 
 
-def format_execute_outcome(evaluation: ExecuteEvaluation) -> str:
-    """Return a compact user-facing execute outcome."""
+def format_execute_outcome(
+    evaluation: ExecuteEvaluation, *, include_contract: bool = True
+) -> str:
+    """Format the execute decision, optionally including the detailed checklist."""
     title = {
         ExecuteDecision.ACHIEVED: "task/execute complete",
         ExecuteDecision.CONTINUE: "task/execute continuing",
@@ -290,11 +302,10 @@ def format_execute_outcome(evaluation: ExecuteEvaluation) -> str:
     lines = [title]
     if evaluation.reason:
         lines.extend(("", f"reason: {evaluation.reason}"))
-    if evaluation.next_instruction:
+    if evaluation.next_instruction and evaluation.decision != ExecuteDecision.ACHIEVED:
         lines.append(f"next: {evaluation.next_instruction}")
-    if evaluation.contract_status:
-        lines.extend(("", "contract status:")
-        )
+    if include_contract and evaluation.contract_status:
+        lines.extend(("", "contract status:"))
         lines.extend(f"- {item}" for item in evaluation.contract_status[:8])
     return "\n".join(lines)
 
@@ -357,15 +368,17 @@ def _all_acceptance_items_checked(plan: str) -> bool:
 
 
 def _has_verification_evidence(text: str) -> bool:
-    markers = (
-        "tests passed",
-        "test passed",
-        "验证通过",
-        "测试通过",
-        "passed",
-        "已验证",
-    )
-    return any(marker in text for marker in markers)
+    if re.search(
+        r"\b(?:[1-9]\d* failed|tests? failed|checks? failed|no tests? passed|"
+        r"not all (?:tests|checks) passed)\b|未通过|不通过|测试失败|验证失败",
+        text,
+    ):
+        return False
+    return bool(re.search(
+        r"\b(?:(?:tests?|checks?|verification) (?:all )?passed|[1-9]\d* passed)\b"
+        r"|验证通过|测试通过|已验证",
+        text,
+    ))
 
 
 def _parse_json_object(content: str) -> dict[str, object]:

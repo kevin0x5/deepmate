@@ -50,6 +50,7 @@ from deepmate.evolution.generated_skills import (
 from deepmate.foundation import utc_isoformat
 from deepmate.storage import JsonlWriter, atomic_write_json, atomic_write_text, file_lock
 from deepmate.storage.session_store import SessionRecord, SessionStore
+from deepmate.storage.jsonl import iter_jsonl_objects
 from deepmate.trace import TraceEvent, TraceRecorder
 
 EVOLUTION_MAINTENANCE_STATE_FILE = "maintenance_state.json"
@@ -698,15 +699,7 @@ def _read_jsonl_records_since(
     if _is_evaluation_path(trace_path) or not trace_path.exists():
         return ()
     records: list[Mapping[str, object]] = []
-    for line in trace_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, Mapping):
-            continue
+    for record in iter_jsonl_objects(trace_path):
         if "maintenance" in _text(record.get("kind")):
             continue
         if _is_record_after(record, "recorded_at", since):
@@ -830,18 +823,9 @@ def _workflow_name_from_tools(tool_names: list[str]) -> str:
 
 def _read_transcript_records(path: Path) -> tuple[Mapping[str, object], ...]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
+        return tuple(iter_jsonl_objects(path))
+    except OSError:
         return ()
-    records: list[Mapping[str, object]] = []
-    for line in lines:
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(record, Mapping):
-            records.append(record)
-    return tuple(records)
 
 
 def _activity_evidence_records(

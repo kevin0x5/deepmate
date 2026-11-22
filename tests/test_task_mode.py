@@ -16,7 +16,7 @@ from deepmate.context import (
     build_system_context_from_snapshot,
 )
 from deepmate.domain import MessageRole, ProfileRef
-from deepmate.providers import ModelResponse
+from deepmate.providers import ModelCapabilities, ModelResponse
 from deepmate.runtime import start_runtime_activation, start_session_runtime
 from deepmate.storage import SessionStore
 from deepmate.tasks import (
@@ -199,6 +199,45 @@ class TaskModeTests(unittest.TestCase):
         )
 
         self.assertEqual(evaluation.decision, ExecuteDecision.ACHIEVED)
+
+    def test_fallback_uses_latest_evidence_instead_of_plan_instructions(self) -> None:
+        plan = _execution_plan_md().replace("- [ ]", "- [x]")
+        docs = TaskDocuments(plan=plan + "\nRecord 'tests passed' after the check.\n## Blocked\n")
+        for answer, expected in (
+            ("Ready to run the checks.", ExecuteDecision.CONTINUE),
+            ("The check was bypassed.", ExecuteDecision.CONTINUE),
+            ("The tests have not passed.", ExecuteDecision.CONTINUE),
+            ("1 passed, 2 failed.", ExecuteDecision.CONTINUE),
+            ("All tests passed.", ExecuteDecision.ACHIEVED),
+        ):
+            with self.subTest(answer=answer):
+                got = evaluate_execute_progress(
+                    None, model="offline", documents=docs,
+                    evidence=ExecuteEvidence(user_prompt="Verify", final_answer=answer),
+                )
+                self.assertEqual(got.decision, expected)
+
+    def test_task_json_requests_follow_model_options_and_output_budgets(self) -> None:
+        for limit, expected in ((300, (300, 300)), (4096, (1400, 700))):
+            with self.subTest(limit=limit):
+                provider = _StubProvider([
+                    ModelResponse(content="{}"),
+                    ModelResponse(content=_execute_eval_json("continue")),
+                ])
+                capabilities = ModelCapabilities(supports_thinking=False)
+                params = dict(
+                    model="example", documents=TaskDocuments(), capabilities=capabilities,
+                    options={"thinking": {"type": "disabled"}, "temperature": 0.2, "max_tokens": limit},
+                )
+                generate_task_update(
+                    provider, **params, stage=TaskStage.PLAN, user_prompt="Plan", final_answer="Done",
+                )
+                evaluate_execute_progress(
+                    provider, **params, evidence=ExecuteEvidence(user_prompt="Verify", final_answer="Done"),
+                )
+                for request, budget in zip(provider.requests, expected, strict=True):
+                    self.assertEqual(request.options, {**params["options"], "max_tokens": budget})
+                    self.assertEqual(request.capabilities, capabilities)
 
     def test_task_update_checkpoint_keeps_partial_valid_fields_when_achievement_missing(
         self,
@@ -398,6 +437,21 @@ class TaskModeTests(unittest.TestCase):
         self.assertFalse(_contains_progress_signal("验证计划见 docs/plan.md"))
         self.assertTrue(_contains_progress_signal("更新了 src/deepmate/tasks/update.py"))
         self.assertTrue(_contains_progress_signal("测试通过"))
+
+    def test_empty_evolution_update_preserves_history_and_allows_achievement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp))
+            store.ensure()
+            original = store.evolution_path.read_bytes()
+            self.assertEqual(
+                apply_task_update_result(store, TaskUpdateResult(), stage=TaskStage.EXECUTE),
+                (),
+            )
+            result = TaskUpdateResult(achievement_title="Verification", achievement_md="Three tests passed.")
+            changed = apply_task_update_result(store, result, stage=TaskStage.EXECUTE)
+            self.assertEqual(len(changed), 1)
+            self.assertIn("Three tests passed.", changed[0].read_text())
+            self.assertEqual(store.evolution_path.read_bytes(), original)
 
     def test_task_update_raises_degenerate_plan_error_without_wrapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -817,6 +871,63 @@ class TaskModeTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "real task/plan.md"):
                 store.save_state(TaskStage.EXECUTE, session_id="session")
+
+    def test_execute_evaluation_can_clear_an_earlier_next_instruction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(_workspace(Path(tmp)))
+            store.ensure()
+            store.write_plan(_execution_plan_md())
+            store.save_state(TaskStage.EXECUTE, execute_status="continue", next_instruction="Run tests")
+            self.assertEqual(store.save_state(TaskStage.EXECUTE).next_instruction, "Run tests")
+            store.save_state(TaskStage.EXECUTE, execute_status="achieved", next_instruction="")
+            self.assertEqual(store.read_state().next_instruction, "")
+
+    def test_completed_status_restores_checklist_and_ignores_legacy_next_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = TaskSessionController(_workspace(Path(tmp)))
+            store = controller.store
+            store.ensure()
+            store.write_plan(_execution_plan_md())
+            completed = parse_execute_evaluation(json.dumps({
+                "decision": "achieved", "next_instruction": "Run the tests again.",
+                "contract_status": ["Both links verified.", None],
+            }))
+            self.assertEqual(completed.next_instruction, "")
+            store.save_state(TaskStage.EXECUTE, execute_status="achieved", contract_status=completed.contract_status)
+            self.assertEqual(store.save_state(TaskStage.EXECUTE).contract_status, ("Both links verified.",))
+            record = json.loads(store.state_path.read_text())
+            record["next_instruction"] = "Run the tests again."
+            store.state_path.write_text(json.dumps(record))
+            self.assertIn("Both links verified.", controller.format_status())
+            self.assertNotIn("next:", controller.format_status())
+            del record["contract_status"]
+            store.state_path.write_text(json.dumps(record))
+            self.assertIn("execute_status: achieved", controller.format_status())
+            self.assertNotIn("contract status:", controller.format_status())
+
+    def test_cli_stops_and_records_unusable_evaluator_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = _workspace(Path(tmp))
+            _write_cli_config(workspace)
+            store = TaskStore(workspace)
+            store.ensure()
+            store.write_plan(_execution_plan_md())
+            provider = _StubProvider([
+                ModelResponse(content="I checked the result."),
+                ModelResponse(content=_task_update_json(stage="execute")),
+                ModelResponse(content='{"decision":"unknown"}'),
+            ])
+            with (
+                patch.dict(os.environ, {"STUB_API_KEY": "test-key"}),
+                patch("deepmate.channels.cli.ChatCompletionsProvider", return_value=provider),
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()),
+            ):
+                main(("--workspace", str(workspace), "--task", "execute"))
+            state = store.read_state()
+            self.assertEqual((state.execute_status, state.execute_turns), ("blocked", 1))
+            self.assertIn("retry verification", state.next_instruction)
+            self.assertFalse(store.read_documents().achievements)
+            self.assertEqual(len(provider.requests), 3)
 
     def test_task_status_and_clear_are_local_controls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

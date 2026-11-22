@@ -87,6 +87,7 @@ class ScriptedProvider:
         if "usage" in item:
             usage_raw = _mapping(item.get("usage", {}))
             usage = TokenUsage(
+                totals_reported="input_tokens" in usage_raw and "output_tokens" in usage_raw,
                 input_tokens=_nonnegative_int(usage_raw.get("input_tokens", 0)),
                 output_tokens=_nonnegative_int(usage_raw.get("output_tokens", 0)),
                 cache_hit_input_tokens=_nonnegative_int(

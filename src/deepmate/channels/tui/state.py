@@ -292,6 +292,7 @@ class TuiRuntimeState:
     pet_last_progress_key: str = ""
     refresh_skill_surface_callback: Callable[["TuiRuntimeState"], None] | None = None
     local_context_prepare_callback: LocalContextPrepareHandler | None = None
+    model_change_callback: Callable[["TuiRuntimeState"], None] | None = None
     behavior_runtime: BehaviorRuntime | None = None
     workspace_switch_request: WorkspaceSwitchRequest | None = None
 

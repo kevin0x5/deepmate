@@ -10,6 +10,7 @@ from deepmate.foundation import normalize_name
 from deepmate.skills.metadata import metadata_text, skill_description
 from deepmate.skills.skill_file import (
     SKILL_FILE_NAME,
+    read_skill_frontmatter,
     read_skill_markdown,
     resolve_skill_file,
 )
@@ -67,7 +68,10 @@ class SkillCatalog:
 def load_skill_card(path: str | Path) -> SkillCard:
     """Load only the frontmatter metadata needed for skill discovery."""
     skill_path = resolve_skill_file(path)
-    metadata, body = read_skill_markdown(skill_path)
+    metadata = read_skill_frontmatter(skill_path)
+    body = ""
+    if not metadata_text(metadata, "description"):
+        metadata, body = read_skill_markdown(skill_path)
     card = SkillCard(
         name=metadata_text(metadata, "name") or skill_path.parent.name,
         description=skill_description(

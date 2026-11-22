@@ -47,7 +47,11 @@ class LocalModelPrepareState:
     def from_json(cls, payload: object) -> "LocalModelPrepareState | None":
         if not isinstance(payload, dict):
             return None
-        if int(payload.get("version", 0) or 0) != LOCAL_STATE_VERSION:
+        try:
+            version = int(payload.get("version", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if version != LOCAL_STATE_VERSION:
             return None
         raw = payload.get("local_model")
         if not isinstance(raw, dict):
@@ -90,12 +94,15 @@ class LocalModelPrepareState:
     def user_message(self) -> str:
         """Return a friendly status line for `/local status`."""
         if self.is_ready():
-            return f"{self.message or '本地模型已就绪。'}"
+            return self.message or "本地模型已就绪。"
         if self.status == "running":
-            return "上次本地模型准备还没有完成。输入 /local 后会自动继续。"
-        if self.status == "failed":
-            return "上次本地模型没有准备完成。输入 /local 后会自动继续。"
-        return self.message or "本地模型还没有准备完成。输入 /local 后会自动继续。"
+            return f"上次进度 · {self.message or self.stage}。输入 /local 可以继续。"
+        detail = " ".join(self.message.split())[:320]
+        if self.stage == "cancelled" or self.failure_kind == "cancelled":
+            return "已取消准备。输入 /local 可以继续已下载的分层。"
+        if detail:
+            return detail if "/local" in detail else f"{detail} 处理后输入 /local 重试。"
+        return "上次本地模型没有准备完成。输入 /local 重试。"
 
 
 class LocalModelStateStore:
@@ -113,7 +120,7 @@ class LocalModelStateStore:
             return None
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
         return LocalModelPrepareState.from_json(payload)
 

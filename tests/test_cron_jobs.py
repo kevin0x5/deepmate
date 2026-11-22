@@ -4,10 +4,12 @@ import io
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,6 +27,7 @@ from deepmate.cron.planner import preflight_job
 from deepmate.cron.runner import run_due_jobs, run_job_now, watch_due_jobs
 from deepmate.cron.schedule import next_run_at
 from deepmate.cron.store import CronJobStore
+from deepmate.storage.atomic import fcntl
 from deepmate.domain import ProfileRef
 from deepmate.runtime import (
     ToolAccessMode,
@@ -36,6 +39,59 @@ from deepmate.storage import SessionStore
 
 
 class CronJobTests(unittest.TestCase):
+    @unittest.skipIf(fcntl is None, "requires filesystem advisory locks")
+    def test_two_runners_observing_the_same_due_job_start_one_model_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            handle_cron_command("/cron add 每天 9 点总结项目", workspace=workspace)
+            store = CronJobStore(workspace)
+            job = store.load()[0]
+            handle_cron_command(f"/cron approve {job.id}", workspace=workspace)
+            job = store.get(job.id)
+            store.save(replace(job, state=replace(job.state, next_run_at="2000-01-01T00:00:00Z")))
+            load = CronJobStore.load
+            snapshots = threading.Barrier(2)
+            worker = threading.local()
+
+            def simultaneous_snapshot(instance):
+                jobs = load(instance)
+                if not getattr(worker, "loaded", False):
+                    worker.loaded = True
+                    snapshots.wait(timeout=5)
+                return jobs
+
+            with (
+                patch.object(CronJobStore, "load", simultaneous_snapshot),
+                patch("deepmate.cron.runner.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok", "")) as run,
+                ThreadPoolExecutor(max_workers=2) as pool,
+            ):
+                reports = list(pool.map(lambda _: run_due_jobs(workspace=workspace), range(2)))
+            self.assertEqual(run.call_count, 1)
+            self.assertIn("No cron jobs due.", reports)
+
+    def test_job_removed_during_a_run_stays_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            handle_cron_command("/cron add 每天 9 点总结项目", workspace=workspace)
+            store = CronJobStore(workspace)
+            job = store.load()[0]
+            handle_cron_command(f"/cron approve {job.id}", workspace=workspace)
+
+            def remove_during_run(command, **kwargs):
+                store.remove(job.id)
+                return subprocess.CompletedProcess(command, 0, "complete", "")
+
+            with patch("deepmate.cron.runner.subprocess.run", remove_during_run):
+                run_job_now(job.id, workspace=workspace)
+            self.assertEqual(store.load(), ())
+
+    def test_interval_uses_elapsed_minutes_across_clock_changes(self) -> None:
+        schedule = CronSchedule("interval", timezone="America/New_York", interval_minutes=60)
+        for now in ("2026-03-08T01:30:00-05:00", "2026-11-01T01:30:00-04:00"):
+            start = datetime.fromisoformat(now)
+            next_time = datetime.fromisoformat(next_run_at(schedule, now=start))
+            self.assertEqual(next_time.astimezone(UTC) - start.astimezone(UTC), timedelta(hours=1))
+
     def test_cron_add_writes_jsonl_with_job_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -279,6 +335,16 @@ class CronJobTests(unittest.TestCase):
             self.assertIsNotNone(message)
             self.assertIn("准备创建定时任务", message or "")
             self.assertEqual(len(CronJobStore(workspace).load()), 1)
+
+    def test_scheduling_words_in_release_note_paths_do_not_create_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            for prompt in ("Check drafts/weekly.md and report broken links.", "Summarize daily.md."):
+                self.assertIsNone(maybe_create_cron_draft(prompt, workspace=workspace))
+            self.assertFalse(CronJobStore(workspace).load())
+            self.assertIsNotNone(maybe_create_cron_draft(
+                "Every weekday at 09:00, summarize drafts/weekly.md.", workspace=workspace
+            ))
 
     def test_cli_cron_command_does_not_require_provider_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

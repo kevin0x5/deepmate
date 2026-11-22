@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -418,7 +418,7 @@ def _run_curator_record(
     session = session_store.load(record.session_id)
     transcript = session_store.transcript_store(session)
     source_text = _source_text_from_sequences(
-        transcript.load_records(),
+        transcript.iter_records(),
         record.source_sequences,
     )
     if not source_text:
@@ -648,14 +648,13 @@ def _strip_fenced_json(text: str) -> str:
 
 
 def _source_text_from_sequences(
-    records: Sequence[TranscriptRecord],
+    records: Iterable[TranscriptRecord],
     sequences: Sequence[int],
 ) -> str:
     wanted = {int(sequence) for sequence in sequences}
     sections = []
-    for record in records:
-        if record.sequence not in wanted:
-            continue
+    selected = (record for record in records if record.sequence in wanted)
+    for record in sorted(selected, key=lambda record: record.sequence):
         item = record.to_item()
         if item is None or item.message is None:
             continue

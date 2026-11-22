@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from deepmate.providers.usage import reported_cache_hit_ratio
+
 if TYPE_CHECKING:
     from deepmate.runtime.agent_loop import AgentStepResult
 
@@ -28,10 +30,7 @@ class TurnCostCacheSummary:
 
     def cache_hit_ratio(self) -> float | None:
         """Return provider-reported cache hit ratio when available."""
-        total = self.cache_hit_input_tokens + self.cache_miss_input_tokens
-        if total <= 0:
-            return None
-        return self.cache_hit_input_tokens / total
+        return reported_cache_hit_ratio(self.cache_hit_input_tokens, self.cache_miss_input_tokens)
 
     def trace_refs(self) -> tuple[str, ...]:
         """Return compact refs for trace records."""

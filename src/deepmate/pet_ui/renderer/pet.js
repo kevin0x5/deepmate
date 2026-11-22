@@ -1,261 +1,94 @@
 const pet = document.getElementById('pet');
 const sprite = document.getElementById('sprite');
 const ctx = sprite.getContext('2d');
-
-const BASE_FRAMES = {
-  dog: [
-    '....................',
-    '...BBB........BBB...',
-    '..BCCCBB....BBCCCB..',
-    '.BCCCCCCBBBBCCCCCCB.',
-    '.BCCCCCCCCCCCCCCCCB.',
-    '.BCCWWCCCCCCCCWWCCB.',
-    '.BCCBBCCCPCCBBCCCB..',
-    '..BCCCCCCCCCCCCCCB..',
-    '...BCCCGGGGCCCB.....',
-    '..BBCCCCCCCCCCBB....',
-    '.B..BCCCCCCCCB..B...',
-    '....BCCCCCCCCB......',
-    '....BB......BB......',
-    '...B..B....B..B.....',
-    '....................',
-    '....................'
-  ],
-  cat: [
-    '....................',
-    '..BB..........BB....',
-    '.BSSB........BSSB...',
-    '.BCCCBBBBBBBBCCCB...',
-    '.BCCCCCCCCCCCCCCB...',
-    '.BCCWWCCCCCCWWCCB...',
-    '.BCCBBCPCCCBCCCB....',
-    'B..BCCCCCCCCCCB..B..',
-    '...BCCCGGGGCCCB.....',
-    '..BBCCCCCCCCCCBB....',
-    '....BCCCCCCCCB......',
-    '....BCCCCCCCCB......',
-    '....BB......BB......',
-    '...B..B....B..B.....',
-    '....................',
-    '....................'
-  ],
-  squirrel: [
-    '....................',
-    '...........BBBB.....',
-    '..........BCCCCB....',
-    '.....BBBBBCCCCCB....',
-    '....BCCCCCCCCCCB....',
-    '...BCCCWWCCCCWWB....',
-    '...BCCBBCPCCBB......',
-    '....BCCCGGGCB.......',
-    '...BBCCCCCCCCB......',
-    '..B..BCCCCCCCB......',
-    '.....BCCCCCCCB......',
-    '.....BB....BBB......',
-    '....B..B..B..B......',
-    '....................',
-    '....................',
-    '....................'
-  ],
-  penguin: [
-    '....................',
-    '......BBBBBBBB......',
-    '.....BSSSSSSSSB.....',
-    '....BSSCCCCCCSSB....',
-    '....BSCWWCCWWCSB....',
-    '....BSCBBCCBBCSB....',
-    '....BSCCCPCCCCSB....',
-    '.....BSGGGGCCSB.....',
-    '......BCCCCCCB......',
-    '.....BBCCCCCCBB.....',
-    '....B..BCCCCB..B....',
-    '.......BG..GB.......',
-    '......G......G......',
-    '....................',
-    '....................',
-    '....................'
-  ]
-};
-
-const PALETTES = {
-  dog: {
-    B: '#3d2b1f',
-    C: '#c98245',
-    W: '#fff4df',
-    P: '#f58ca8',
-    G: '#ffd166',
-    Y: '#f4c430',
-    R: '#e85d75',
-    L: '#7cc7ff',
-    S: '#fff4df'
-  },
-  cat: {
-    B: '#3f4657',
-    C: '#8fa3bf',
-    W: '#f5f7fb',
-    P: '#b7a6d9',
-    G: '#f3f0ff',
-    Y: '#d8c76f',
-    R: '#d7728a',
-    L: '#91b8ff',
-    S: '#d7deea'
-  },
-  squirrel: {
-    B: '#4a2d1f',
-    C: '#9a5b2f',
-    W: '#ffe6bd',
-    P: '#dd8f45',
-    G: '#8ab17d',
-    Y: '#f2c14e',
-    R: '#dd6b6b',
-    L: '#77c7c2',
-    S: '#6d8f57'
-  },
-  penguin: {
-    B: '#1d2633',
-    C: '#f7fbff',
-    W: '#98d8ef',
-    P: '#ffb4a2',
-    G: '#f4c430',
-    Y: '#f4c430',
-    R: '#e76f8a',
-    L: '#80d8ff',
-    S: '#bdefff'
-  }
-};
-
-const FRAME_MS = 420;
-const PIXEL_SIZE = 7;
-const DRAW_OFFSET_X = 10;
-const DRAW_OFFSET_Y = 8;
-const DRAG_THRESHOLD_PX = 2;
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const STATES = ['idle', 'thinking', 'working', 'waiting', 'reporting', 'celebrate', 'blocked', 'resting', 'offline'];
 const SPECIES = ['dog', 'cat', 'squirrel', 'penguin'];
-const REACTIONS = ['poke'];
-const FRAME_CACHE = buildFrameCache();
+const DRAG_THRESHOLD_PX = 2;
 
+const frames = new Map();
+let currentVisual = 'idle';
+let currentSpecies = 'dog';
+let blinkTimer = null;
+let reactionTimer = null;
 let lastPoint = null;
 let dragOrigin = null;
 let dragging = false;
-let lastClickAt = 0;
+let clickTimer = null;
 let mouseRegionActive = false;
-let currentVisual = 'idle';
-let currentSpecies = 'dog';
-let frameTick = 0;
 
-function cleanState(value) {
-  const state = String(value || 'idle').toLowerCase();
-  return STATES.includes(state) ? state : 'idle';
+function paintRows(context, rows, palette, left = 0, top = 0) {
+  rows.forEach((row, y) => {
+    for (let x = 0; x < row.length; x += 1) {
+      const color = palette[row[x]];
+      if (color) {
+        context.fillStyle = color;
+        context.fillRect(left + x, top + y, 1, 1);
+      }
+    }
+  });
 }
 
-function cleanSpecies(profile) {
-  const species = String((profile && profile.species) || 'dog').toLowerCase();
-  return SPECIES.includes(species) ? species : 'dog';
+function buildFrames(portrait) {
+  const open = document.createElement('canvas');
+  open.width = portrait.rows[0].length;
+  open.height = portrait.rows.length;
+  paintRows(open.getContext('2d'), portrait.rows, portrait.palette);
+  const closed = open.cloneNode();
+  const eyes = closed.getContext('2d');
+  eyes.drawImage(open, 0, 0);
+  for (const patch of portrait.closedEyes) {
+    paintRows(eyes, patch.rows, portrait.palette, patch.x, patch.y);
+  }
+  return { open, closed };
+}
+
+function drawFace(closed) {
+  const face = frames.get(currentSpecies);
+  if (!face) return;
+  ctx.clearRect(0, 0, sprite.width, sprite.height);
+  ctx.drawImage(closed ? face.closed : face.open, 0, 0);
+}
+
+function scheduleBlink() {
+  window.clearTimeout(blinkTimer);
+  const resting = currentVisual === 'resting' || currentVisual === 'offline';
+  drawFace(resting);
+  if (resting || document.hidden || reducedMotion.matches || !frames.size) return;
+  blinkTimer = window.setTimeout(() => {
+    drawFace(true);
+    blinkTimer = window.setTimeout(scheduleBlink, 150);
+  }, 4400);
 }
 
 function applyState(state) {
-  currentVisual = cleanState(state.state);
-  currentSpecies = cleanSpecies(state.profile || {});
-  pet.className = `pet state-${currentVisual} species-${currentSpecies}`;
-  renderSprite();
-  const reaction = cleanReaction(state.reaction);
-  if (reaction) {
-    pet.classList.add(`reaction-${reaction}`);
-    window.setTimeout(() => pet.classList.remove(`reaction-${reaction}`), 700);
+  const requestedVisual = String(state.state || '').toLowerCase();
+  const requestedSpecies = String(state.profile?.species || '').toLowerCase();
+  const visual = STATES.includes(requestedVisual) ? requestedVisual : 'idle';
+  const species = SPECIES.includes(requestedSpecies) ? requestedSpecies : 'dog';
+  if (currentVisual !== visual || currentSpecies !== species) {
+    currentVisual = visual;
+    currentSpecies = species;
+    pet.className = `pet state-${visual} species-${species}`;
+    scheduleBlink();
+  }
+  if (String(state.reaction || '').toLowerCase() === 'poke') {
+    window.clearTimeout(reactionTimer);
+    pet.classList.add('reaction-poke');
+    reactionTimer = window.setTimeout(() => pet.classList.remove('reaction-poke'), 700);
   }
 }
 
-function cleanReaction(value) {
-  const reaction = String(value || '').toLowerCase();
-  return REACTIONS.includes(reaction) ? reaction : '';
-}
-
-function renderSprite() {
-  const frames = FRAME_CACHE[currentSpecies] || FRAME_CACHE.dog;
-  const variants = frames[currentVisual] || frames.idle;
-  const frame = variants[frameTick % variants.length];
-  const palette = PALETTES[currentSpecies] || PALETTES.dog;
-  ctx.clearRect(0, 0, sprite.width, sprite.height);
-  ctx.imageSmoothingEnabled = false;
-  frame.forEach((row, y) => {
-    Array.from(row).forEach((code, x) => {
-      const color = palette[code];
-      if (!color) return;
-      ctx.fillStyle = color;
-      ctx.fillRect(
-        DRAW_OFFSET_X + x * PIXEL_SIZE,
-        DRAW_OFFSET_Y + y * PIXEL_SIZE,
-        PIXEL_SIZE,
-        PIXEL_SIZE
-      );
-    });
-  });
-}
-
-function buildFrameCache() {
-  return Object.fromEntries(
-    Object.entries(BASE_FRAMES).map(([species, base]) => [species, stateFrames(base)])
-  );
-}
-
-function stateFrames(base) {
-  return {
-    idle: [base, shift(base, 0, 1)],
-    thinking: [base, ears(base, 'G'), shift(ears(base, 'G'), 1, 0)],
-    working: [base, shift(base, 1, 0), shift(base, -1, 0)],
-    waiting: [ears(base, 'Y'), shift(ears(base, 'Y'), 0, -1)],
-    reporting: [ears(base, 'L'), shift(ears(base, 'L'), 0, -1)],
-    celebrate: [sparkle(base, 'G'), shift(sparkle(base, 'G'), 0, -1)],
-    blocked: [ears(base, 'R'), shift(ears(base, 'R'), 0, 1)],
-    resting: [shift(base, 0, 1), shift(base, 0, 2)],
-    offline: [shift(base, 0, 2)]
-  };
-}
-
-function shift(frame, dx, dy) {
-  let rows = frame.slice();
-  const width = rows[0].length;
-  if (dy > 0) {
-    rows = Array(dy).fill('.'.repeat(width)).concat(rows.slice(0, -dy));
-  } else if (dy < 0) {
-    rows = rows.slice(-dy).concat(Array(-dy).fill('.'.repeat(width)));
+window.deepmatePet.onPortraits((portraits) => {
+  for (const species of SPECIES) {
+    frames.set(species, buildFrames(portraits[species]));
   }
-  return rows.map((row) => {
-    if (dx > 0) return '.'.repeat(dx) + row.slice(0, -dx);
-    if (dx < 0) return row.slice(-dx) + '.'.repeat(-dx);
-    return row;
-  });
-}
-
-function ears(frame, code) {
-  const rows = frame.slice();
-  if (rows.length < 2) return frame;
-  rows[1] = replaceAt(rows[1], 2, code);
-  rows[1] = replaceAt(rows[1], Math.max(0, rows[1].length - 3), code);
-  return rows;
-}
-
-function sparkle(frame, code) {
-  const rows = ears(frame, code);
-  if (rows.length < 4) return rows;
-  rows[0] = replaceAt(rows[0], 6, code);
-  rows[2] = replaceAt(rows[2], Math.max(0, rows[2].length - 7), code);
-  return rows;
-}
-
-function replaceAt(row, index, code) {
-  if (index < 0 || index >= row.length) return row;
-  return row.slice(0, index) + code + row.slice(index + 1);
-}
-
-window.setInterval(() => {
-  frameTick += 1;
-  renderSprite();
-}, FRAME_MS);
-
+  scheduleBlink();
+});
+document.addEventListener('visibilitychange', scheduleBlink);
+reducedMotion.addEventListener('change', scheduleBlink);
 window.deepmatePet.onState(applyState);
 window.deepmatePet.ready('pet');
-renderSprite();
 
 function isInteractivePoint(event) {
   if (dragging) return true;
@@ -284,10 +117,7 @@ pet.addEventListener('pointerleave', () => {
 });
 
 pet.addEventListener('pointerdown', (event) => {
-  if (event.button === 2) {
-    window.deepmatePet.showMenu();
-    return;
-  }
+  if (event.button !== 0) return;
   setMouseRegion(true);
   lastPoint = { x: event.screenX, y: event.screenY };
   dragOrigin = lastPoint;
@@ -309,9 +139,8 @@ pet.addEventListener('pointermove', (event) => {
 });
 
 pet.addEventListener('pointerup', (event) => {
-  if (lastPoint) {
-    pet.releasePointerCapture(event.pointerId);
-  }
+  if (event.button !== 0 || !lastPoint) return;
+  pet.releasePointerCapture(event.pointerId);
   lastPoint = null;
   dragOrigin = null;
   if (dragging) {
@@ -319,15 +148,25 @@ pet.addEventListener('pointerup', (event) => {
     window.deepmatePet.finishDrag();
     return;
   }
-  const now = Date.now();
-  if (now - lastClickAt < 360) {
+  if (clickTimer !== null) {
+    window.clearTimeout(clickTimer);
+    clickTimer = null;
     window.deepmatePet.setReaction('poke');
     window.deepmatePet.openCurrentWork();
-    lastClickAt = 0;
     return;
   }
-  lastClickAt = now;
-  window.deepmatePet.toggleHud();
+  clickTimer = window.setTimeout(() => {
+    clickTimer = null;
+    window.deepmatePet.toggleHud();
+  }, 320);
+});
+
+pet.addEventListener('pointercancel', () => {
+  lastPoint = null;
+  dragOrigin = null;
+  if (dragging) window.deepmatePet.finishDrag();
+  dragging = false;
+  setMouseRegion(false);
 });
 
 pet.addEventListener('contextmenu', (event) => {

@@ -383,8 +383,9 @@ def _read_section(
     mtime_ns = after[0] if after is not None else 0
     read_stable = before == after and after is not None
     content = raw_content.strip()
-    size_bytes = len(raw_content.encode("utf-8"))
-    sha256 = hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
+    encoded = raw_content.encode("utf-8")
+    size_bytes = len(encoded)
+    sha256 = hashlib.sha256(encoded).hexdigest()
     estimated_tokens = _estimate_context_tokens(content)
     if not content:
         status = "empty_optional" if optional else "empty_required"

@@ -28,6 +28,8 @@ def looks_like_cron_request(text: str) -> bool:
     clean = text.strip().lower()
     if not clean or clean.startswith("/"):
         return False
+    # A filename such as drafts/weekly.md does not express a recurrence.
+    intent = re.sub(r"[a-z0-9_-]+(?:[./\\][a-z0-9_-]+)+", " ", clean)
     schedule_markers = (
         "每天",
         "每日",
@@ -55,8 +57,8 @@ def looks_like_cron_request(text: str) -> bool:
         "summarize",
         "report",
     )
-    return any(marker in clean for marker in schedule_markers) and any(
-        marker in clean for marker in action_markers
+    return any(marker in intent for marker in schedule_markers) and any(
+        marker in intent for marker in action_markers
     )
 
 

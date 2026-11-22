@@ -20,8 +20,8 @@ from rich.markup import escape
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
+from rich.theme import Theme
 from textual import events
-from textual.app import ScreenStackError
 from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.strip import Strip
@@ -98,9 +98,10 @@ from deepmate.storage import TurnCheckpointStore, WorkspaceCheckpointStore
 from deepmate.tools import NativeTool, NativeToolRegistry
 
 from textual.app import App, ComposeResult, ScreenStackError
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import (
+    Button,
     Input,
     Label,
     ListItem,
@@ -116,6 +117,7 @@ MAX_PROMPT_CHARS = 20_000
 WORKSPACE_SWITCH_EXIT_CODE = 75
 APPROVAL_WAIT_TIMEOUT_SECONDS = 30 * 60
 FOOTER_REFRESH_MIN_INTERVAL_SECONDS = 0.15
+SIDEBAR_BREAKPOINT = 100
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 PASTE_DEDUPE_SECONDS = 0.4
 PROMPT_HISTORY_LIMIT = 100
@@ -166,6 +168,7 @@ class _PendingApproval:
     subject: str = ""
     refs: tuple[str, ...] = ()
     session_id: str = ""
+    allow_for_turn: bool = False
 
 
 @dataclass(slots=True)
@@ -226,8 +229,16 @@ class _PromptTextArea(TextArea):
     def cursor_position(self, offset: int) -> None:
         self.move_cursor(_text_area_location_for_offset(self.text, int(offset)))
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in {"cursor_page_up", "cursor_page_down"} and getattr(self.app, "_active_tab", "main") != "main":
+            return False
+        return super().check_action(action, parameters)
+
     def _on_key(self, event: events.Key) -> None:
-        if event.key == "shift+enter":
+        if event.key in {"shift+enter", "ctrl+j"}:
+            event.prevent_default()
+            event.stop()
+            _insert_prompt_text(self, "\n", max_chars=MAX_PROMPT_CHARS)
             return
         if event.key != "enter":
             return
@@ -256,6 +267,39 @@ class _SelectableRichLog(RichLog):
     """RichLog variant that exposes its rendered lines to Textual selection copy."""
 
     _selected_text_cache = ""
+    _layout_width = 0
+    _live_line_start: int | None = None
+
+    def clear(self) -> _SelectableRichLog:
+        self._live_line_start = None
+        return super().clear()
+
+    def write_message(self, message: TuiMessage) -> None:
+        # RichLog defers writes until the first layout. Only retain an offset
+        # once its list of rendered lines is authoritative.
+        start = len(self.lines)
+        self.write(_render_message(message), expand=_should_expand_message(message.kind))
+        self._live_line_start = start if message.status == "live" and len(self.lines) > start else None
+
+    def replace_live_tail(self, message: TuiMessage) -> bool:
+        if self._live_line_start is None:
+            return False
+        del self.lines[self._live_line_start:]
+        self._line_cache.clear()
+        self.write_message(message)
+        self.refresh()
+        return True
+
+    def on_resize(self, event: events.Resize) -> None:
+        width = event.size.width
+        if width and width != self._layout_width:
+            previous, self._layout_width = self._layout_width, width
+            if previous:
+                self.call_after_refresh(self._reflow_at_width, width)
+
+    def _reflow_at_width(self, width: int) -> None:
+        if self.display and self.region.width == width:
+            self.app._reflow_content()
 
     def get_selection(self, selection) -> tuple[str, str] | None:
         text = "\n".join(line.text.rstrip() for line in self.lines)
@@ -364,84 +408,99 @@ class DeepmateTuiApp(App):
     """A lightweight TUI workbench over the existing Deepmate runtime."""
 
     CSS = """
+    $dm-canvas: #171c22;
+    $dm-rail: #12171c;
+    $dm-bar: #202830;
+    $dm-field: #242e35;
+    $dm-rule: #3a4650;
+    $dm-selected: #34434c;
+    $dm-hover: #2b3841;
+    $dm-ink: #e2e8e6;
+    $dm-muted: #a4afb4;
+    $dm-accent: #f2bc7b;
+
     * {
-        scrollbar-background: #333333;
-        scrollbar-color: #4a4a4a;
-        scrollbar-color-hover: #5a5a5a;
-        scrollbar-color-active: #6a6a6a;
-        scrollbar-corner-color: #333333;
+        scrollbar-background: $dm-canvas;
+        scrollbar-color: $dm-rule;
+        scrollbar-color-hover: #657783;
+        scrollbar-color-active: #97a7b0;
+        scrollbar-corner-color: $dm-canvas;
     }
     Screen {
-        background: #333333;
-        color: #d8d8d8;
+        background: $dm-canvas;
+        color: $dm-ink;
         border: none;
         padding: 0;
         margin: 0;
         overflow: hidden;
     }
     Screen > .screen--selection {
-        background: #4a5658;
-        color: #f0f0f0;
+        background: $dm-selected;
+        color: $dm-ink;
     }
     DeepmateTuiApp {
-        background: #333333;
+        background: $dm-canvas;
         border: none;
         padding: 0;
         margin: 0;
     }
+    #session-row {
+        height: 1;
+        background: $dm-bar;
+        color: $dm-ink;
+    }
     #title-bar {
-        background: #333333;
-        color: #8fb7bd;
-        height: 1;
-        padding: 0 2;
-        margin: 0;
-    }
-    #session-row, #status-bar {
-        background: #333333;
-        color: #8a8a8a;
-        height: 1;
-        margin: 0;
-    }
-    #session-tabs {
         width: auto;
-        background: #333333;
-        color: #c8c8c8;
+        height: 1;
+        color: $dm-accent;
+        text-style: bold;
+        padding: 0 2;
     }
-    #session-spacer {
-        width: 1fr;
-        background: #333333;
+    #session-tabs, #model-name {
+        width: auto;
+        height: 1;
     }
-    #context-window {
-        width: 28;
+    #model-name, #context-window {
+        width: auto;
+        max-width: 30;
         padding: 0 1;
-        color: #8a8a8a;
-        content-align: right middle;
+        color: $dm-muted;
+        text-overflow: ellipsis;
+        text-wrap: nowrap;
+    }
+    #session-spacer { width: 1fr; }
+    #status-bar {
+        height: 1;
+        padding: 0 1;
+        background: $dm-bar;
+        color: $dm-muted;
     }
     #body {
         height: 1fr;
-        background: #333333;
+        background: $dm-canvas;
         border: none;
         padding: 0;
         margin: 0;
     }
     #sidebar {
-        width: 36;
-        background: #2f2f2f;
-        border-right: solid #464646;
+        width: 26;
+        background: $dm-rail;
+        border-right: solid $dm-rule;
     }
     #sidebar-title {
-        height: 1;
-        color: #a7a7a7;
+        height: 2;
+        content-align: left middle;
+        color: $dm-ink;
         padding: 0 2;
         text-style: bold;
     }
-    #sidebar-hint {
-        height: 1;
-        color: #8fb7bd;
-        background: #2f2f2f;
-        padding: 0 2;
-        border-top: solid #464646;
-    }
+    Screen.-compact #sidebar { width: 1fr; border-right: none; }
+    Screen.-compact #title-bar { padding: 0 1; }
+    Screen.-short #input-gap { display: none; }
+    Screen.-short #prompt-glyph { height: 1; }
+    Screen.-short #prompt-input { margin: 0; max-height: 3; }
+    Screen.-short #approval-scroll { max-height: 3; }
+    Screen.-compact .approval-action { width: 1fr; min-width: 0; margin: 0; }
     #content {
         width: 1fr;
         min-width: 0;
@@ -449,111 +508,115 @@ class DeepmateTuiApp(App):
     }
     #workbench {
         height: 1fr;
-        background: #333333;
+        background: $dm-canvas;
     }
     #main-column {
         width: 1fr;
         min-width: 0;
-        background: #333333;
+        background: $dm-canvas;
     }
     #content-tabs {
         height: 1;
-        background: #333333;
-        color: #8a8a8a;
+        background: $dm-canvas;
+        color: $dm-muted;
         padding: 0 1;
         text-style: bold;
     }
     #chat {
         height: 1fr;
-        padding: 0 1;
-        background: #333333;
+        padding: 1 2 0 2;
+        background: $dm-canvas;
     }
     #content-markdown {
         height: 1fr;
         padding: 0 2;
-        background: #333333;
-        color: #d8d8d8;
+        background: $dm-canvas;
+        color: $dm-ink;
         overflow-y: auto;
-        scrollbar-background: #333333;
-        scrollbar-color: #4a4a4a;
-        scrollbar-color-hover: #5a5a5a;
-        scrollbar-color-active: #6a6a6a;
+        scrollbar-background: $dm-canvas;
+        scrollbar-color: $dm-rule;
+        scrollbar-color-hover: #657783;
+        scrollbar-color-active: #97a7b0;
         scrollbar-size-vertical: 1;
         display: none;
     }
     Markdown {
-        background: #333333;
-        color: #d8d8d8;
+        background: $dm-canvas;
+        color: $dm-ink;
         overflow-y: auto;
     }
     MarkdownBlock {
-        background: #333333;
-        color: #d8d8d8;
+        background: $dm-canvas;
+        color: $dm-ink;
     }
     MarkdownH1, MarkdownH2, MarkdownH3 {
-        color: #8fb7bd;
+        color: $dm-accent;
     }
     MarkdownCode {
-        background: #2b2b2b;
-        color: #e0e0e0;
-        border: solid #464646;
+        background: $dm-field;
+        color: $dm-ink;
+        border: solid $dm-rule;
     }
     MarkdownFence {
-        background: #2b2b2b;
-        color: #e0e0e0;
-        border: solid #464646;
+        background: $dm-field;
+        color: $dm-ink;
+        border: solid $dm-rule;
     }
     MarkdownBlockQuote {
         color: #b7b7b7;
-        background: #2b2b2b;
-        border-left: solid #5a5a5a;
+        background: $dm-field;
+        border-left: solid #657783;
     }
     #command-hints {
         height: auto;
         max-height: 8;
-        background: #2b2b2b;
+        background: $dm-field;
         color: #b7b7b7;
         padding: 0 2;
         display: none;
     }
     #approval-panel {
         height: auto;
-        max-height: 11;
-        background: #2b2b2b;
-        color: #e0e0e0;
-        border-top: solid #4a4a4a;
+        background: $dm-field;
+        color: $dm-ink;
+        border-top: solid $dm-rule;
         padding: 0 2;
         display: none;
     }
     #approval-title {
-        height: auto;
-        color: #8fbe8f;
+        height: 1;
+        color: $dm-accent;
         text-style: bold;
+    }
+    #approval-scroll {
+        height: auto;
+        max-height: 34vh;
+        scrollbar-size-vertical: 1;
     }
     #approval-body {
         height: auto;
-        max-height: 6;
-        overflow-y: hidden;
-        color: #d8d8d8;
+        color: $dm-ink;
     }
     #approval-actions {
         height: 1;
-        background: #2b2b2b;
+        background: $dm-field;
     }
     .approval-action {
         width: auto;
         min-width: 12;
         height: 1;
+        min-height: 1;
+        border: none;
         margin: 0 2 0 0;
         padding: 0 1;
-        background: #3a3a3a;
-        color: #e0e0e0;
+        background: $dm-hover;
+        color: $dm-ink;
         content-align: center middle;
     }
-    .approval-action:hover,
-    .approval-action:focus {
-        background: #4a5658;
-        color: #ffffff;
+    .approval-action:hover, .approval-action:focus {
+        background: $dm-accent !important;
+        color: $dm-rail !important;
+        text-style: bold underline;
     }
     #approval-once {
         background: #314137;
@@ -569,45 +632,45 @@ class DeepmateTuiApp(App):
     }
     #input-gap {
         height: 1;
-        background: #333333;
+        background: $dm-canvas;
     }
     #input-row {
         width: 1fr;
         min-width: 0;
         height: auto;
         max-height: 10;
-        background: #2c2c2c;
+        background: $dm-field;
         padding: 0 1;
-        border-left: solid #2c2c2c;
+        border-left: solid $dm-field;
         overflow-x: hidden;
         overflow-y: auto;
     }
     #input-row:focus-within {
-        border-left: solid #8fb7bd;
+        border-left: solid $dm-accent;
     }
     #prompt-glyph {
         width: 2;
         height: 3;
-        color: #8fb7bd;
+        color: $dm-accent;
         content-align: center middle;
     }
     #new-session {
-        width: 9;
-        min-width: 9;
+        width: auto;
+        min-width: 3;
         height: 1;
         padding: 0;
         margin: 0;
-        background: #333333;
-        color: #8fb7bd;
+        background: $dm-bar;
+        color: $dm-accent;
         content-align: center middle;
     }
     #new-session:hover {
-        background: #3f3f3f !important;
-        color: #f0f0f0 !important;
+        background: $dm-hover !important;
+        color: $dm-ink !important;
     }
     #new-session:focus {
-        background: #3f3f3f !important;
-        color: #f0f0f0 !important;
+        background: $dm-hover !important;
+        color: $dm-ink !important;
     }
     #prompt-input {
         width: 1fr;
@@ -616,8 +679,8 @@ class DeepmateTuiApp(App):
         min-height: 1;
         max-height: 8;
         margin: 1 0;
-        background: #2c2c2c;
-        color: #c8c8c8;
+        background: $dm-field;
+        color: $dm-ink;
         border: none;
         padding: 0 1;
         overflow-x: hidden;
@@ -625,66 +688,69 @@ class DeepmateTuiApp(App):
         scrollbar-size-vertical: 1;
     }
     #prompt-input:focus {
-        background: #2c2c2c;
-        color: #d8d8d8;
+        background: $dm-field;
+        color: $dm-ink;
         border: none;
         background-tint: transparent;
     }
     #prompt-input > .text-area--cursor {
-        background: #8fb7bd;
-        color: #202020;
+        background: $dm-accent;
+        color: $dm-rail;
     }
     #prompt-input > .text-area--selection {
-        background: #4a5658;
-        color: #f0f0f0;
+        background: $dm-selected;
+        color: $dm-ink;
     }
     #prompt-input > .text-area--placeholder {
-        color: #777777;
+        color: $dm-muted;
     }
     RichLog {
-        background: #333333;
-        color: #d8d8d8;
+        scrollbar-gutter: stable;
+        overflow-x: hidden;
+        background: $dm-canvas;
+        color: $dm-ink;
         border: none;
-        scrollbar-background: #333333;
-        scrollbar-color: #4a4a4a;
-        scrollbar-color-hover: #5a5a5a;
-        scrollbar-color-active: #6a6a6a;
+        scrollbar-background: $dm-canvas;
+        scrollbar-color: $dm-rule;
+        scrollbar-color-hover: #657783;
+        scrollbar-color-active: #97a7b0;
         scrollbar-size-vertical: 1;
     }
     RichLog:focus {
         border: none;
-        background: #333333;
+        background: $dm-canvas;
         background-tint: transparent;
     }
     #file-tree {
         height: 1fr;
-        background: #2f2f2f;
-        color: #d8d8d8;
+        padding: 0 1;
+        background: $dm-rail;
+        color: $dm-ink;
         border: none;
-        scrollbar-background: #2f2f2f;
-        scrollbar-color: #4a4a4a;
-        scrollbar-color-hover: #5a5a5a;
-        scrollbar-color-active: #6a6a6a;
+        scrollbar-background: $dm-rail;
+        scrollbar-color: $dm-rule;
+        scrollbar-color-hover: #657783;
+        scrollbar-color-active: #97a7b0;
         scrollbar-size-vertical: 1;
     }
     #file-tree:focus {
-        background: #2f2f2f;
+        background: $dm-rail;
         background-tint: transparent;
     }
     #file-tree > ListItem {
-        background: #2f2f2f !important;
-        color: #d8d8d8 !important;
+        background: $dm-rail !important;
+        color: $dm-ink !important;
     }
     #file-tree > ListItem Label {
         background: transparent !important;
-        color: #d8d8d8 !important;
+        color: $dm-ink !important;
     }
     #file-tree > ListItem.-highlight,
     #file-tree > ListItem.-highlight.-hovered,
     #file-tree:focus > ListItem.-highlight,
     #file-tree:focus > ListItem.-highlight.-hovered {
-        background: #4a5658 !important;
-        color: #f0f0f0 !important;
+        background: $dm-selected !important;
+        color: $dm-ink !important;
         text-style: none !important;
     }
     #file-tree > ListItem.-highlight Label,
@@ -693,13 +759,13 @@ class DeepmateTuiApp(App):
     #file-tree:focus > ListItem.-hovered Label,
     #file-tree > ListItem.-highlight.-hovered Label,
     #file-tree:focus > ListItem.-highlight.-hovered Label {
-        background: #4a5658 !important;
-        color: #f0f0f0 !important;
+        background: $dm-selected !important;
+        color: $dm-ink !important;
         text-style: none !important;
     }
     #file-tree > ListItem.-hovered {
-        background: #3f3f3f !important;
-        color: #f0f0f0 !important;
+        background: $dm-hover !important;
+        color: $dm-ink !important;
     }
     .session-tab {
         width: auto;
@@ -708,35 +774,35 @@ class DeepmateTuiApp(App):
         padding: 0 1;
         margin: 0;
         border: none !important;
-        background: #333333 !important;
-        color: #c8c8c8 !important;
+        background: $dm-bar !important;
+        color: $dm-ink !important;
         text-style: bold !important;
         content-align: left middle;
     }
     .session-tab:hover,
     .session-tab:focus {
-        background: #3f3f3f !important;
-        color: #f0f0f0 !important;
+        background: $dm-hover !important;
+        color: $dm-ink !important;
     }
     .session-tab-active {
-        background: #333333 !important;
-        color: #f0f0f0 !important;
+        background: $dm-selected !important;
+        color: $dm-ink !important;
         border: none !important;
     }
     .dim {
-        color: #8a8a8a;
+        color: $dm-muted;
     }
     .accent {
-        color: #8fb7bd;
+        color: $dm-accent;
     }
     .green {
-        color: #8fbe8f;
+        color: #99cab1;
     }
     .amber {
-        color: #d0b66b;
+        color: $dm-accent;
     }
     .red {
-        color: #d98a8a;
+        color: #e7a59e;
     }
     .magenta {
         color: #a993bd;
@@ -744,7 +810,7 @@ class DeepmateTuiApp(App):
     """
 
     BINDINGS = [
-        ("ctrl+d", "quit", "Quit"),
+        Binding("ctrl+d", "quit", "Quit", priority=True),
         Binding("ctrl+c,super+c", "copy_screen_selection", "Copy", show=False, priority=True),
         Binding("escape", "interrupt_or_cancel", "Interrupt", priority=True),
         ("ctrl+v", "paste_clipboard", "Paste"),
@@ -758,10 +824,6 @@ class DeepmateTuiApp(App):
     ]
 
     exit_code = 0
-    # Default the file-tree sidebar to open so the workspace is visible on first
-    # screen; the sidebar footer shows the Ctrl+B shortcut to collapse it.
-    # compose() builds the widget unconditionally, so on_mount() syncs the
-    # initial display to this flag.
     sidebar_visible = reactive(True)
 
     def __init__(
@@ -771,6 +833,25 @@ class DeepmateTuiApp(App):
         initial_prompts: tuple[str, ...] = (),
     ) -> None:
         super().__init__()
+        self.console.push_theme(
+            Theme(
+                {
+                    "markdown.h1": "bold #dcebe7",
+                    "markdown.h2": "bold #a8cec4",
+                    "markdown.h3": "bold #bad1c8",
+                    "markdown.h4": "bold #bad1c8",
+                    "markdown.code": "#b9dcdb on #2a3030",
+                    "markdown.link": "underline #a4cfd2",
+                    "diff.inserted": "#a8cfab",
+                    "diff.deleted": "#e6a2a0",
+                    "diff.context": "#a7b2b1",
+                },
+                inherit=False,
+            )
+        )
+        self._terminal_size = (0, 0)
+        self._compact_layout = False
+        self._sidebar_preferences = {False: True, True: False}
         self.state = state
         self.initial_prompts = list(initial_prompts)
         self._exiting = False
@@ -892,8 +973,8 @@ class DeepmateTuiApp(App):
         self._session_messages.pop(session_id, None)
 
     def compose(self) -> ComposeResult:
-        yield Static("deepmate", id="title-bar")
         with Horizontal(id="session-row"):
+            yield Static("deepmate", id="title-bar", markup=False)
             with Horizontal(id="session-tabs"):
                 for session_id, title in self._visible_session_tabs():
                     yield Static(
@@ -901,34 +982,35 @@ class DeepmateTuiApp(App):
                         id=_session_button_id(session_id),
                         classes=self._session_tab_classes(session_id),
                     )
-            yield Static("｜ New +", id="new-session")
+            yield Static("＋ 新会话", id="new-session")
             yield Static("", id="session-spacer")
+            yield Static(self.state.model, id="model-name", markup=False)
             yield Static(self._context_window_label(), id="context-window")
         with Horizontal(id="body"):
             with Vertical(id="sidebar"):
                 yield Static(_workspace_nav_title(self.state.workspace), id="sidebar-title")
                 yield ListView(id="file-tree")
-                yield Static("Ctrl+B 关闭侧栏", id="sidebar-hint")
             with Vertical(id="content"):
                 with Horizontal(id="workbench"):
                     with Vertical(id="main-column"):
                         yield Static(self._content_tabs_label(), id="content-tabs")
-                        yield _SelectableRichLog(id="chat", wrap=True, highlight=False, markup=True)
-                        yield _SelectableRichLog(id="content-markdown", wrap=True, highlight=False, markup=False)
+                        yield _SelectableRichLog(id="chat", min_width=1, wrap=True, highlight=False, markup=True, auto_scroll=False)
+                        yield _SelectableRichLog(id="content-markdown", min_width=1, wrap=True, highlight=False, markup=False, auto_scroll=False)
                 yield Static("", id="command-hints")
                 with Vertical(id="approval-panel"):
                     yield Static("", id="approval-title")
-                    yield Static("", id="approval-body")
+                    with VerticalScroll(id="approval-scroll"):
+                        yield Static("", id="approval-body")
                     with Horizontal(id="approval-actions"):
-                        yield Static("Allow once", id="approval-once", classes="approval-action")
-                        yield Static("Always allow", id="approval-session", classes="approval-action")
-                        yield Static("Deny", id="approval-deny", classes="approval-action")
+                        yield Button("允许一次", id="approval-once", classes="approval-action")
+                        yield Button("本会话允许", id="approval-session", classes="approval-action")
+                        yield Button("拒绝", id="approval-deny", classes="approval-action")
                 yield Static("", id="input-gap")
                 with Horizontal(id="input-row"):
-                    yield Static(">", id="prompt-glyph")
+                    yield Static("›", id="prompt-glyph")
                     yield _PromptTextArea(
                         "",
-                        placeholder="Type a task or /command...",
+                        placeholder="写下任务…",
                         id="prompt-input",
                     )
         yield Static(self._status_label(), id="status-bar")
@@ -940,11 +1022,11 @@ class DeepmateTuiApp(App):
         self.state.live_status_callback = self._update_live_status_from_worker
         self.state.final_message_callback = self._append_final_messages_from_worker
         self.state.token_stream_callback = self._stream_tokens_from_worker
-        self._refresh_file_tree()
-        self.query_one("#sidebar").display = self.sidebar_visible
-        self._refresh_content_tabs()
-        self._refresh_footer()
-        self._write_start_message()
+        preview = self.query_one("#content-markdown", _SelectableRichLog)
+        self.watch(preview, "show_vertical_scrollbar", self._refresh_footer, init=False)
+        self._apply_terminal_layout(self.size.width, self.size.height)
+        self._restore_main_messages_from_transcript()
+        self._render_active_tab()
         self.query_one("#prompt-input", TextArea).focus()
         self._spinner_timer = self.set_interval(0.1, self._tick_spinner)
         self._stream_timer = self.set_interval(0.06, self._flush_token_stream)
@@ -962,6 +1044,46 @@ class DeepmateTuiApp(App):
                 self._enqueue_prompt(prompt, prefix="本地模型准备好后会继续执行。")
             else:
                 self._submit_prompt(prompt)
+
+    def on_resize(self, event: events.Resize) -> None:
+        if self.query("#prompt-input"):
+            self._apply_terminal_layout(event.size.width, event.size.height)
+
+    def _apply_terminal_layout(self, width: int, height: int) -> None:
+        if width <= 0 or (width, height) == self._terminal_size:
+            return
+        self._terminal_size = (width, height)
+        self._compact_layout = width < SIDEBAR_BREAKPOINT
+        self.screen.set_class(self._compact_layout, "-compact")
+        self.screen.set_class(height <= 18, "-short")
+        self._show_sidebar(self._sidebar_preferences[self._compact_layout])
+        if self._command_hint_matches:
+            self.call_after_refresh(self._render_command_hints)
+
+    def _show_sidebar(self, visible: bool) -> None:
+        was_in_tree = getattr(self.focused, "id", "") == "file-tree"
+        self.sidebar_visible = visible
+        self.query_one("#sidebar").display = visible
+        self.query_one("#content").display = not (visible and self._compact_layout)
+        if visible:
+            self._refresh_file_tree()
+        elif was_in_tree:
+            self.query_one("#prompt-input").focus()
+        self._refresh_content_tabs()
+        self._refresh_footer()
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        if self.is_mounted:
+            self._refresh_footer()
+
+    def _reflow_content(self) -> None:
+        if self._compact_layout and self.sidebar_visible:
+            return
+        log = self.query_one("#chat" if self._active_tab == "main" else "#content-markdown", RichLog)
+        previous_y = log.scroll_y
+        self._render_active_tab()
+        if self._active_tab != "main" or not self._chat_follow_tail:
+            log.scroll_to(y=previous_y, animate=False)
 
     def _maybe_use_prepared_local_model(self) -> None:
         """Use an already prepared local model when no cloud model is available."""
@@ -1154,30 +1276,16 @@ class DeepmateTuiApp(App):
         self._last_file_tree_signature = ()
         self._refresh_file_tree()
 
-    def on_static_clicked(self, event: Static.Clicked) -> None:
-        widget_id = event.static.id
-        approval_action = _approval_action_from_widget_id(widget_id or "")
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        approval_action = _approval_action_from_widget_id(event.button.id or "")
         if approval_action is not None:
             event.stop()
             self._resolve_pending_approval(approval_action)
-            return
-        session_id = _session_id_from_button_id(widget_id or "")
-        if session_id:
-            self._switch_session(session_id)
-            return
-        if widget_id == "content-tabs":
-            event.stop()
-            self._handle_content_tab_click(getattr(event, "x", 0))
 
     def on_click(self, event: events.Click) -> None:
         widget_id = getattr(event.widget, "id", "") or ""
         if widget_id == "new-session":
             self._create_new_session()
-            return
-        approval_action = _approval_action_from_widget_id(widget_id)
-        if approval_action is not None:
-            event.stop()
-            self._resolve_pending_approval(approval_action)
             return
         session_id = _session_id_from_button_id(widget_id)
         if session_id:
@@ -1262,7 +1370,7 @@ class DeepmateTuiApp(App):
                 ) % len(self._command_hint_matches)
                 self._render_command_hints()
                 return
-            if self._handle_prompt_history_key(event.key):
+            if focused_prompt and self._handle_prompt_history_key(event.key):
                 event.prevent_default()
                 event.stop()
                 return
@@ -1296,6 +1404,8 @@ class DeepmateTuiApp(App):
         if self._file_item_is_dir[index]:
             self._toggle_file_dir(relative)
             return
+        if self._compact_layout:
+            self.action_toggle_sidebar()
         if relative.startswith("... more files;"):
             self._handle_file_reference_command("/files")
             return
@@ -1415,6 +1525,12 @@ class DeepmateTuiApp(App):
         if self._pending_approval_is_current_session():
             self._resolve_pending_approval("deny")
             return
+        if self._command_hint_matches:
+            self._hide_command_hints()
+            return
+        if self._compact_layout and self.sidebar_visible:
+            self.action_toggle_sidebar()
+            return
         if self._active_tab != "main":
             self._close_active_tab_with_feedback()
             return
@@ -1482,11 +1598,11 @@ class DeepmateTuiApp(App):
         )
 
     def action_toggle_sidebar(self) -> None:
-        self.sidebar_visible = not self.sidebar_visible
-        sidebar = self.query_one("#sidebar")
-        sidebar.display = self.sidebar_visible
-        self._refresh_content_tabs()
-        self._refresh_footer()
+        visible = not self.sidebar_visible
+        self._sidebar_preferences[self._compact_layout] = visible
+        self._hide_command_hints()
+        self._show_sidebar(visible)
+        self.query_one("#file-tree" if visible else "#prompt-input").focus()
 
     def action_help(self) -> None:
         self._handle_immediate_command("/commands")
@@ -1676,6 +1792,7 @@ class DeepmateTuiApp(App):
                 kind="user",
                 title="you",
                 body=visible_prompt or prompt,
+                status="automatic" if display_prompt is not None and not remember_prompt else "",
                 refs=(f"turn_anchor={turn_anchor_id}",),
             )
         )
@@ -1971,10 +2088,11 @@ class DeepmateTuiApp(App):
         if not self._current_session_is_running():
             self._route_checkpoint_writes_to_current_session()
         current = session_id == self.state.session.session_id
-        if current and (failed or interrupted):
+        if current:
             self._clear_live_work()
-        elif current:
-            self._clear_live_work()
+        elif session_id in self._session_messages:
+            buffer = self._session_messages[session_id]
+            buffer[:] = [message for message in buffer if message.status != "live"]
         self._close_computer_use_after_turn(session_id, active_turn)
         if current and (failed or interrupted):
             self._pause_prompt_queue(
@@ -2051,8 +2169,23 @@ class DeepmateTuiApp(App):
         materialized = tuple(messages)
         active_turn = self._session_turns.get(session_id)
         display_messages = _undelivered_messages(active_turn, materialized)
-        if active_turn is not None and _contains_visible_answer(materialized):
+        if (
+            active_turn is not None
+            and not active_turn.answer_visible
+            and _contains_visible_answer(materialized)
+        ):
             active_turn.answer_visible = True
+            # The final message owns the answer now. A last timer tick or a
+            # session switch must not paint the same streamed text beneath it.
+            self._stream_pending.pop(session_id, None)
+            self._stream_content.pop(session_id, None)
+            self._stream_reasoning.pop(session_id, None)
+            self._session_live_status.pop(session_id, None)
+            buffer = self._messages_for_session(session_id)
+            buffer[:] = [message for message in buffer if message.status != "live"]
+            if session_id == self._current_session_id():
+                self._live_status_text = ""
+                self._live_message_active = False
         if not display_messages:
             return
         self._insert_messages_for_session(
@@ -2289,16 +2422,16 @@ class DeepmateTuiApp(App):
         return True
 
     def _write(self, message: TuiMessage) -> None:
+        was_empty = not self._main_messages
         rerender = self._append_main_message(message)
         if self._active_tab != "main":
             self._refresh_content_tabs()
             return
-        if rerender:
+        if was_empty or rerender:
             self._render_active_tab()
             return
-        log = self.query_one("#chat", RichLog)
-        rendered = _render_message(message)
-        log.write(rendered, expand=_should_expand_message(message.kind))
+        log = self.query_one("#chat", _SelectableRichLog)
+        log.write_message(message)
         self._maybe_scroll_chat_end(log)
 
     def _append_main_message(self, message: TuiMessage) -> bool:
@@ -2364,6 +2497,7 @@ class DeepmateTuiApp(App):
 
     def _start_live_work(self, body: str = "Preparing context...") -> None:
         self._live_status_text = body.strip() or "working on"
+        self._session_live_status[self._current_session_id()] = self._live_status_text
         self._upsert_live_message()
         self._safe_refresh_footer_throttled()
 
@@ -2384,8 +2518,20 @@ class DeepmateTuiApp(App):
         message = self._pending_status_message
         if message is None:
             return
-        self._append_main_message(message)
+        messages = self._main_messages
+        replacing = bool(messages and messages[-1].status == "live")
+        if replacing:
+            if messages[-1] == message:
+                return
+            messages[-1] = message
+        else:
+            self._append_main_message(message)
         if self._active_tab == "main":
+            if replacing and self._terminal_size[0]:
+                log = self.query_one("#chat", _SelectableRichLog)
+                if log.replace_live_tail(message):
+                    self._maybe_scroll_chat_end(log)
+                    return
             self._render_active_tab()
 
     def _clear_live_work(self, final_summary: str = "") -> None:
@@ -2443,9 +2589,10 @@ class DeepmateTuiApp(App):
         session_id: str,
         content: str,
         reasoning: str,
+        turn: _TurnRun | None = None,
     ) -> None:
         pending = self._stream_pending.get(session_id)
-        if pending is not None:
+        if pending is not None and (turn is None or self._session_turns.get(session_id) is turn):
             pending.append((content, reasoning))
 
     def _flush_token_stream(self) -> None:
@@ -2519,6 +2666,9 @@ class DeepmateTuiApp(App):
     ) -> None:
         body = message.body.strip() or message.title.strip()
         if not body:
+            return
+        turn = self._session_turns.get(session_id)
+        if turn is not None and turn.answer_visible and _is_generic_live_status(body):
             return
         if _is_generic_live_status(body) and _is_specific_live_status(
             self._session_live_status.get(session_id, "")
@@ -2691,7 +2841,7 @@ class DeepmateTuiApp(App):
 
     def _remember_unsent_draft(self, text: str) -> None:
         clean = _clean_input_text(text).strip()
-        if clean and not clean.startswith("/restore-draft"):
+        if clean and clean.split(maxsplit=1)[0] not in {"/restore-draft", "/setup-key"}:
             self._session_unsent_drafts[self.state.session.session_id] = clean
 
     def _restore_unsent_draft(self) -> None:
@@ -2751,6 +2901,8 @@ class DeepmateTuiApp(App):
         try:
             input_widget = self.query_one("#prompt-input", TextArea)
         except (NoMatches, ScreenStackError):
+            return False
+        if "\n" in _prompt_text(input_widget) and self._session_prompt_history_index.get(session_id) is None:
             return False
         index = self._session_prompt_history_index.get(session_id)
         if index is None:
@@ -2831,6 +2983,8 @@ class DeepmateTuiApp(App):
         )
 
     def _open_content_tab(self, title: str, content: str, *, render_mode: str = "auto") -> None:
+        if self._compact_layout and self.sidebar_visible:
+            self.action_toggle_sidebar()
         clean_title = title.strip() or "detail"
         self._open_tabs[clean_title] = _OpenTab(
             title=clean_title,
@@ -2840,21 +2994,23 @@ class DeepmateTuiApp(App):
         self._active_tab = clean_title
         self._save_content_tabs_for_session(self.state.session.session_id)
         self._render_active_tab()
+        self._refresh_footer()
 
     def _render_active_tab(self) -> None:
         self._refresh_content_tabs()
-        log = self.query_one("#chat", RichLog)
+        log = self.query_one("#chat", _SelectableRichLog)
         markdown = self.query_one("#content-markdown", _SelectableRichLog)
         if self._active_tab == "main":
             markdown.display = False
             log.display = True
+            previous_y = log.scroll_y
             log.clear()
-            for message in self._main_messages:
-                log.write(
-                    _render_message(message),
-                    expand=_should_expand_message(message.kind),
-                )
-            self._maybe_scroll_chat_end(log)
+            for message in self._main_messages or (self._welcome_message(),):
+                log.write_message(message)
+            if self._chat_follow_tail:
+                self._maybe_scroll_chat_end(log)
+            else:
+                log.scroll_to(y=previous_y, animate=False)
             return
         log.display = False
         markdown.display = True
@@ -2882,7 +3038,7 @@ class DeepmateTuiApp(App):
         return ["main", *self._open_tabs.keys()]
 
     def _content_tabs_visible(self) -> bool:
-        return self.sidebar_visible or bool(self._open_tabs)
+        return bool(self._open_tabs)
 
     def _refresh_content_tabs(self) -> None:
         tabs = self.query_one("#content-tabs", Static)
@@ -2945,6 +3101,7 @@ class DeepmateTuiApp(App):
         self._active_tab = target
         self._save_content_tabs_for_session(self.state.session.session_id)
         self._render_active_tab()
+        self._refresh_footer()
 
     def _safe_render_active_tab(self) -> None:
         try:
@@ -2977,6 +3134,7 @@ class DeepmateTuiApp(App):
         self._active_tab = "main"
         self._save_content_tabs_for_session(self.state.session.session_id)
         self._safe_render_active_tab()
+        self._refresh_footer()
         return True
 
     def _active_tab_content(self) -> str:
@@ -2994,7 +3152,8 @@ class DeepmateTuiApp(App):
             else self.query_one("#content-markdown", _SelectableRichLog)
         )
         if action == "page_up":
-            self._chat_follow_tail = False
+            if self._active_tab == "main":
+                self._chat_follow_tail = False
             target.scroll_page_up(animate=False)
         elif action == "page_down":
             target.scroll_page_down(animate=False)
@@ -3276,6 +3435,8 @@ class DeepmateTuiApp(App):
                 return
 
     def _refresh_file_tree(self) -> None:
+        if not self.sidebar_visible:
+            return
         items = workspace_file_items(
             self.state.workspace,
             expanded_dirs=tuple(self._expanded_dirs),
@@ -3308,8 +3469,15 @@ class DeepmateTuiApp(App):
 
     def _refresh_footer(self) -> None:
         try:
+            model = self.query_one("#model-name", Static)
+            model.update(self.state.model)
+            model.display = self._terminal_size[0] >= 65
+            self.query_one("#new-session", Static).update("＋" if self._compact_layout else "＋ 新会话")
             self._refresh_session_tabs()
-            self.query_one("#context-window", Static).update(self._context_window_label())
+            context = self.query_one("#context-window", Static)
+            context_label = self._context_window_label()
+            context.update(context_label)
+            context.display = context_label != "ctx --"
             status_bar = self.query_one("#status-bar", Static)
             label = self._status_label()
             status_bar.update(label)
@@ -3333,16 +3501,18 @@ class DeepmateTuiApp(App):
     def _visible_session_tabs(self) -> list[tuple[str, str]]:
         active_id = self.state.session.session_id
         tabs = list(self._session_tabs)
-        if len(tabs) <= 4:
+        width = self._terminal_size[0]
+        limit = max(1, min(4, (width - 36) // 32)) if width else 4
+        if len(tabs) <= limit:
             return tabs
         active_index = next(
             (index for index, (session_id, _) in enumerate(tabs) if session_id == active_id),
             -1,
         )
         if active_index < 0:
-            return [*tabs[-3:], (active_id, self.state.session.title)]
-        start = min(max(0, active_index - 1), max(0, len(tabs) - 4))
-        return tabs[start : start + 4]
+            return [*tabs, (active_id, self.state.session.title)][-limit:]
+        start = min(max(0, active_index - int(limit > 1)), len(tabs) - limit)
+        return tabs[start : start + limit]
 
     def _session_tab_text(self, session_id: str, title: str) -> str:
         active = session_id == self.state.session.session_id
@@ -3354,20 +3524,14 @@ class DeepmateTuiApp(App):
             dot = "•"
         else:
             dot = "·"
-        clean_title = _short_session_title(title, active=active)
-        suffix = session_id[:8]
-        if active and len(self._session_tabs) > 4:
-            current = next(
-                (
-                    index
-                    for index, (known_id, _) in enumerate(self._session_tabs, start=1)
-                    if known_id == session_id
-                ),
-                0,
-            )
-            if current:
-                suffix = f"{suffix} {current}/{len(self._session_tabs)}"
-        return f"{dot} {clean_title} · {suffix}"
+        name = title.strip() or "Untitled session"
+        label = Text("未命名" if name == "Untitled session" else name)
+        width = self._terminal_size[0]
+        limit = max(5, min(20, width - 28)) if self._compact_layout else (24 if active else 16)
+        ambiguous = sum(known_title == name for _, known_title in self._session_tabs) > 1
+        label.truncate(limit - 5 if ambiguous and limit > 9 else limit, overflow="ellipsis")
+        suffix = f" {session_id[:4]}" if ambiguous else ""
+        return f"{dot} {escape(label.plain)}{suffix}"
 
     def _session_tab_classes(self, session_id: str) -> str:
         base = "session-tab"
@@ -3417,26 +3581,38 @@ class DeepmateTuiApp(App):
         stage = self.state.task_stage_label()
         left = _footer_left_label(self.state)
         if self._trusted:
-            left = f"{left}  │  auto-approve"
+            left = "  │  ".join(filter(None, (left, "auto-approve")))
         if (
             self.state.behavior_runtime is not None
             and self.state.behavior_runtime.computer_use_enabled
             and "computer on" not in left
         ):
-            left = f"{left}  │  computer on"
+            left = "  │  ".join(filter(None, (left, "computer on")))
         show_left = self._trusted or (
             self.state.behavior_runtime is not None
             and self.state.behavior_runtime.computer_use_enabled
         )
         if self._pending_approval_is_current_session():
-            center = "approval · waiting for your choice"
-            queue_count = self._approval_queue_count_for_current_session()
-            if queue_count:
-                center += f" · {queue_count} queued"
-            right = "Esc deny"
+            center = "等待审批"
+            right = "Tab 选择  ·  Esc 拒绝"
+        elif self.sidebar_visible and (
+            self._compact_layout or getattr(self._safe_focused(), "id", "") == "file-tree"
+        ):
+            back = "Esc 返回" if self._compact_layout else "Ctrl+B 收起"
+            return f"↑↓ 选择文件  ·  Enter 打开  ·  {back}"
+        elif self._command_hint_matches:
+            return "↑↓ 选择  ·  Tab 补全  ·  Esc 收起"
+        elif self._local_prepare_running:
+            center = "正在准备本地模型"
+            right = "Esc 取消"
+        elif self._active_tab != "main" and not self._current_session_is_running():
+            preview = self.query_one("#content-markdown", _SelectableRichLog)
+            if preview.show_vertical_scrollbar:
+                return "Esc 返回对话  ·  Page Up / Page Down 滚动"
+            return "Esc 返回对话"
         elif self._current_session_is_running():
-            center = f"{SPINNER_FRAMES[self._spinner_frame]} running"
-            right = "Esc interrupt"
+            center = f"{SPINNER_FRAMES[self._spinner_frame]} 执行中"
+            right = "Esc 中断"
         elif self._other_session_running_label():
             center = self._other_session_running_label()
             right = "new prompts queue"
@@ -3450,22 +3626,28 @@ class DeepmateTuiApp(App):
             center = stage
             right = "/task"
         else:
-            return left if show_left else ""
-        return f"{left}  │  {center}  │  {right}"
+            if show_left:
+                return left
+            if 0 < self._terminal_size[0] < 60:
+                return "Enter 发送  ·  Ctrl+B 文件  ·  F1 帮助"
+            hints = "Enter 发送  ·  Shift+Enter 换行  ·  Ctrl+B 文件  ·  F1 帮助"
+            if self._current_tab_content and self._terminal_size[0] >= 85:
+                hints += "  ·  /detail 详情"
+            return hints
+        if self._compact_layout and not show_left:
+            return f"{center}  ·  {right}"
+        return "  │  ".join(filter(None, (left, center, right)))
 
-    def _write_start_message(self) -> None:
-        self._write(
-            TuiMessage(
-                kind="welcome",
-                title="new session",
-                body=_welcome_splash(
-                    workspace=self.state.workspace,
-                    session_id=self.state.session.session_id,
-                    provider_name=self.state.provider_name,
-                    api_key_env=self.state.provider_api_key_env,
-                    api_key_available=self.state.provider_api_key_available,
-                ),
-            )
+    def _welcome_message(self) -> TuiMessage:
+        return TuiMessage(
+            kind="welcome",
+            title="new session",
+            body=_welcome_splash(
+                workspace=None if self.sidebar_visible else self.state.workspace,
+                provider_name=self.state.provider_name,
+                api_key_env=self.state.provider_api_key_env,
+                api_key_available=self.state.provider_api_key_available,
+            ),
         )
 
     def _handle_preview_command(self, value: str) -> bool:
@@ -3809,16 +3991,9 @@ class DeepmateTuiApp(App):
             return False
         continuation = self.state.task_continuations[0]
         self.state.task_continuations = tuple(self.state.task_continuations[1:])
-        self._write(
-            TuiMessage(
-                kind="task",
-                title="task/execute",
-                body="Continuing task/execute automatically.",
-            )
-        )
         self._submit_prompt(
             continuation,
-            display_prompt="task/execute auto-continue",
+            display_prompt="按验收结果继续下一轮",
             remember_prompt=False,
         )
         return True
@@ -4009,6 +4184,7 @@ class DeepmateTuiApp(App):
         # explicit until the remaining TUI state is moved into SessionUiState.
         if session_id != self.state.session.session_id:
             raise RuntimeError("worker turn state must be built while its session is active")
+        turn = self._session_turns.get(session_id)
         approval_cache = self._approval_cache_for_session(session_id)
         native_tools = self._native_tools_for_approval_cache(approval_cache, session_id)
         state = replace(
@@ -4045,6 +4221,7 @@ class DeepmateTuiApp(App):
                     session_id,
                     content,
                     reasoning,
+                    turn,
                 )
             ),
             tool_approval_callback=(
@@ -4175,17 +4352,13 @@ class DeepmateTuiApp(App):
         if session.session_id not in self._session_messages:
             self._restore_main_messages_from_transcript()
         if session.session_id in self._session_running:
-            self._live_status_text = self._session_live_status.get(
-                session.session_id,
-                "Working on this session...",
-            )
-            self._upsert_live_message()
+            self._live_status_text = self._session_live_status.get(session.session_id, "")
+            if self._live_status_text:
+                self._upsert_live_message()
         self._session_has_updates.discard(session.session_id)
         self._promote_current_session_approval()
         self._render_approval_panel()
         self._render_active_tab()
-        if not self._main_messages:
-            self._write_start_message()
         self._refresh_file_tree()
         self._refresh_footer()
 
@@ -4245,23 +4418,15 @@ class DeepmateTuiApp(App):
         self._main_messages = list(messages)
 
     def _update_command_hints(self, value: str) -> None:
-        panel = self.query_one("#command-hints", Static)
         clean = value.strip()
-        if not clean.startswith("/"):
-            panel.display = False
-            panel.update("")
-            self._command_hint_matches = ()
-            self._command_hint_index = 0
-            return
         matches = tuple(
-            hint for hint in _COMMAND_HINTS if hint[0].startswith(clean) or clean == "/"
-        )[:8]
+            hint for hint in _COMMAND_HINTS if hint[0].startswith(clean)
+        ) if clean.startswith("/") else ()
         if not matches:
-            panel.display = False
-            panel.update("")
-            self._command_hint_matches = ()
-            self._command_hint_index = 0
+            if self._command_hint_matches:
+                self._hide_command_hints()
             return
+        opening = not self._command_hint_matches
         previous = self._selected_command_hint()
         self._command_hint_matches = matches
         if previous:
@@ -4276,6 +4441,8 @@ class DeepmateTuiApp(App):
         else:
             self._command_hint_index = 0
         self._render_command_hints()
+        if opening and self._terminal_size[0]:
+            self._refresh_footer()
 
     def _hide_command_hints(self) -> None:
         self._command_hint_matches = ()
@@ -4286,6 +4453,8 @@ class DeepmateTuiApp(App):
             return
         panel.display = False
         panel.update("")
+        if self._terminal_size[0]:
+            self._refresh_footer()
 
     def _render_command_hints(self) -> None:
         panel = self.query_one("#command-hints", Static)
@@ -4293,15 +4462,22 @@ class DeepmateTuiApp(App):
             panel.display = False
             panel.update("")
             return
+        width = max(1, getattr(panel, "content_size", self.size).width or self.size.width or 78)
+        if isinstance(panel, Static) and not panel.display:
+            width = max(1, self.query_one("#content").size.width - 4)
+        rows = max(2, min(8, (self._terminal_size[1] or 32) // 4))
+        start = max(0, self._command_hint_index - rows + 1)
         lines = []
-        for index, (command, description) in enumerate(self._command_hint_matches):
+        for index, (command, description) in enumerate(self._command_hint_matches[start:start + rows], start):
             selected = index == self._command_hint_index
             command_style = "bold #7fd6df" if selected else "#cad7dc"
-            description_style = "#93aab3" if selected else "#687d86"
+            description_style = "#b9ced1" if selected else "#9aabb0"
             prefix = "› " if selected else "  "
+            detail = Text(description)
+            detail.truncate(max(0, width - cell_len(prefix + command) - 2), overflow="ellipsis")
             lines.append(
                 f"{prefix}[{command_style}]{escape(command)}[/]  "
-                f"[{description_style}]{escape(description)}[/]"
+                f"[{description_style}]{escape(detail.plain)}[/]"
             )
         panel.update("\n".join(lines))
         panel.display = True
@@ -4411,18 +4587,22 @@ class DeepmateTuiApp(App):
         session_approvals = self._tool_session_approvals_for_session(session_id)
         if approval_key in session_approvals:
             return True
+        refs = decision.refs
+        if not _approval_ref_map(refs).get("approval_key"):
+            refs = (*refs, f"approval_key={approval_key}")
         body = _approval_body(
             decision.reason,
-            decision.refs,
+            refs,
             fallback=f"tool={tool.name}",
         )
         result = self._request_approval(
-            "Tool approval",
+            "工具审批",
             body,
             subtitle=tool.name,
             subject=f"tool {tool.name}",
-            refs=decision.refs,
+            refs=refs,
             session_id=session_id,
+            allow_for_turn=True,
         )
         if result == "session":
             session_approvals.add(approval_key)
@@ -4461,7 +4641,7 @@ class DeepmateTuiApp(App):
         )
         return approval_decision_from_text(
             self._request_approval(
-                "Safety approval",
+                "操作审批",
                 body,
                 subtitle=decision.risk_level.value,
                 subject=_safety_approval_subject(decision),
@@ -4479,6 +4659,7 @@ class DeepmateTuiApp(App):
         subject: str = "",
         refs: tuple[str, ...] = (),
         session_id: str = "",
+        allow_for_turn: bool = False,
     ) -> str:
         pending = _PendingApproval(
             title=title,
@@ -4488,6 +4669,7 @@ class DeepmateTuiApp(App):
             subject=subject,
             refs=refs,
             session_id=session_id,
+            allow_for_turn=allow_for_turn,
         )
         if not self._safe_call_from_thread(self._show_pending_approval, pending):
             pending.result = "deny"
@@ -4519,6 +4701,8 @@ class DeepmateTuiApp(App):
     def _show_pending_approval(self, pending: _PendingApproval) -> None:
         if self._pending_approval is not None:
             self._approval_queue.append(pending)
+            self._promote_current_session_approval()
+            self._render_approval_panel()
             self._refresh_footer()
             return
         self._pending_approval = pending
@@ -4655,19 +4839,18 @@ class DeepmateTuiApp(App):
             title.update("")
             body.update("")
             return
+        if self._compact_layout and self.sidebar_visible:
+            self.action_toggle_sidebar()
         panel.display = True
+        once = self.query_one("#approval-once", Button)
+        once.label = "本轮允许" if pending.allow_for_turn else "允许一次"
         label = pending.title
         if pending.subtitle:
             label = f"{label} · {pending.subtitle}"
         session_queue_count = self._approval_queue_count_for_current_session()
         if session_queue_count:
-            label = f"{label} · {session_queue_count} queued"
-        if (
-            pending.session_id
-            and pending.session_id != self.state.session.session_id
-        ):
-            label = f"{label} · from session {pending.session_id[:8]}"
-        title.update(label)
+            label = f"{label} · 另有 {session_queue_count} 项待审"
+        title.update(escape(label))
         diff = _approval_diff_renderable(_approval_ref_map(pending.refs))
         if diff is None:
             body.update(escape(pending.body))
@@ -4695,29 +4878,29 @@ def _approval_body(
     action = _approval_action_summary(reason, tool)
     lines = [action]
     if path:
-        lines.append(f"Location: {path}")
+        lines.append(f"路径  {path}")
     elif tool:
-        lines.append(f"Action type: {_approval_tool_label(tool)}")
+        lines.append(f"操作  {_approval_tool_label(tool)}")
     if ref_values.get("command"):
-        lines.append(f"Command: {_clip_middle(ref_values['command'], 140)}")
+        lines.append(f"命令  {_clip_middle(ref_values['command'], 140)}")
     size = (
         ref_values.get("content_chars")
         or ref_values.get("new_text_chars")
         or ref_values.get("old_text_chars")
     )
     if size:
-        lines.append(f"Size: {size} chars")
+        lines.append(f"长度  {size} 字符")
     risk = ref_values.get("risk", "").strip()
     if risk:
-        lines.append(f"Risk: {risk.replace('_', ' ')}")
+        lines.append(f"风险  {risk.replace('_', ' ')}")
     approval_key = ref_values.get("approval_key", "").strip()
     if approval_key:
-        lines.append(f"Scope: {approval_key}")
+        lines.append(f"范围  {approval_key}")
     preview_lines = _approval_content_preview_lines(ref_values)
     if preview_lines:
         lines.extend(preview_lines)
-    if not path and not tool and fallback.strip():
-        lines.append(f"Scope: {fallback.strip()}")
+    if not path and not tool and not approval_key and fallback.strip():
+        lines.append(f"范围  {fallback.strip()}")
     if not lines:
         lines = [reason.strip() or "This action needs your confirmation."]
     if tool == "run_shell_command" or fallback in {
@@ -4728,11 +4911,8 @@ def _approval_body(
         "capability:environment",
     }:
         lines.append(
-            "Command permissions are confirmed per risk level; "
-            "network or environment changes may prompt again."
+            "权限按风险等级确认，访问网络或修改环境时可能需要再次授权。"
         )
-    lines.append("Allow once: applies to this request only.")
-    lines.append("Allow for session: remembered until Deepmate exits.")
     return "\n".join(lines)
 
 
@@ -4744,22 +4924,18 @@ def _approval_content_preview_lines(ref_values: dict[str, str]) -> list[str]:
 
     if old_text or new_text:
         stat = _approval_diff_stat(old_text, new_text)
-        lines = [f"Change summary: {stat}" if stat else "Change summary: text edit"]
+        lines = [f"差异  {stat}" if stat else "差异  文本编辑"]
         if _looks_like_markup(old_text) or _looks_like_markup(new_text):
-            lines.append("Preview hidden: view HTML/XML content in the file.")
-        else:
-            snippet = _approval_text_snippet(new_text or old_text)
-            if snippet:
-                lines.append(f"Snippet: {snippet}")
+            lines.append("请在文件中查看 HTML/XML 原文。")
         return lines
     if content:
-        lines = ["Content summary: new file content"]
+        lines = ["写入内容"]
         if _looks_like_markup(content):
-            lines.append("Preview hidden: open the file to view HTML/XML content.")
+            lines.append("请在文件中查看 HTML/XML 原文。")
         else:
             snippet = _approval_text_snippet(content)
             if snippet:
-                lines.append(f"Snippet: {snippet}")
+                lines.append(snippet)
         return lines
     return []
 
@@ -4817,11 +4993,11 @@ def _approval_diff_renderable(ref_values: dict[str, str]) -> Text | None:
             clipped = True
             break
         if line.startswith("+"):
-            diff.append(line + "\n", style="green")
+            diff.append(line + "\n", style="diff.inserted")
         elif line.startswith("-"):
-            diff.append(line + "\n", style="red")
+            diff.append(line + "\n", style="diff.deleted")
         else:
-            diff.append(line + "\n", style="#687d86")
+            diff.append(line + "\n", style="diff.context")
         rows += 1
     if rows == 0:
         return None
@@ -4875,17 +5051,17 @@ def _approval_action_summary(reason: str, tool: str) -> str:
     clean_reason = " ".join(reason.strip().split())
     clean_tool = tool.strip()
     if clean_tool == "write_text_file":
-        return "Deepmate wants to create or overwrite a file."
+        return "将创建或覆盖文件"
     if clean_tool == "edit_text_file":
-        return "Deepmate wants to modify a file."
+        return "将修改文件"
     if clean_tool == "run_shell_command":
-        return "Deepmate wants to run a command."
+        return "将运行命令"
     if clean_tool.startswith("browser_") or clean_tool == "load_browser_tools":
-        return "Deepmate wants to control the browser."
+        return "将操作浏览器"
     if clean_tool.startswith("computer_"):
-        return "Deepmate wants to control the computer."
+        return "将操作电脑"
     if clean_tool:
-        return f"Deepmate wants to run: {_approval_tool_label(clean_tool)}."
+        return f"将调用 {_approval_tool_label(clean_tool)}"
     return clean_reason or "This action needs your confirmation."
 
 
@@ -4940,6 +5116,8 @@ def _approval_result_body(pending: _PendingApproval) -> str:
         or "this action"
     )
     label = _approval_result_label(pending.result)
+    if pending.result == "once" and pending.allow_for_turn:
+        label = "allowed for this turn"
     if pending.result == "deny":
         return f"Permission {label} for {subject}."
     return f"Permission {label} for {subject}. Deepmate will continue automatically."
@@ -4949,7 +5127,9 @@ def _approval_result_line(pending: _PendingApproval) -> str:
     subject = _approval_result_subject(pending)
     if pending.result == "deny":
         return f"Denied: {subject}"
-    scope = "session" if pending.result == "session" else "once"
+    scope = pending.result
+    if scope == "once" and pending.allow_for_turn:
+        scope = "turn"
     return f"Allowed ({scope}): {subject}"
 
 
@@ -4975,6 +5155,8 @@ def _approval_result_subject(pending: _PendingApproval) -> str:
 
 
 def _approval_key_subject(key: str) -> str:
+    if key == "capability:workspace-write":
+        return "workspace writes"
     if key == "capability:shell":
         return "shell execution"
     if key == "capability:shell-medium":
@@ -5228,6 +5410,12 @@ def _read_clipboard() -> str:
 def _insert_prompt_text(input_widget: object, text: str, *, max_chars: int) -> bool:
     current = _prompt_text(input_widget)
     pasted = _clean_input_text(text)
+    if isinstance(input_widget, TextArea):
+        available = max_chars - len(current) + len(input_widget.selected_text)
+        if not pasted or available <= 0:
+            return False
+        input_widget.replace(pasted[:available], *input_widget.selection, maintain_selection_offset=False)
+        return True
     selection = getattr(input_widget, "selection", None)
     start = end = int(getattr(input_widget, "cursor_position", len(current)) or 0)
     if selection is not None and not getattr(selection, "is_empty", True):
@@ -5345,10 +5533,12 @@ def _file_nav_label(
         label.append(indent)
     if is_dir:
         marker = "▾" if expanded else "▸"
-        label.append(f"{marker} {name}/")
+        label.append(f"{marker} ", style="#99a8b0")
+        label.append(f"{name}/", style="bold")
         return label
     icon = _file_icon(clean)
-    label.append(f"{icon} {name}")
+    label.append(f"{icon} ", style="#899aa6")
+    label.append(name)
     clean_badge = badge.strip()
     if clean_badge:
         label.append(f" {clean_badge}", style=_file_badge_style(clean_badge))
@@ -5635,7 +5825,7 @@ def _single_path_token(clean: str) -> str | None:
 def _footer_left_label(state: TuiRuntimeState) -> str:
     summary = _capability_status_summary(state)
     cache = state.runtime_stats.cache_summary()
-    parts = [state.model]
+    parts = []
     if summary:
         parts.append(summary)
     if cache:

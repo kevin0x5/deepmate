@@ -132,9 +132,10 @@ def _read_text_file(root: Path, arguments: Mapping[str, object]) -> NativeToolRe
     # latin-1, binary noise) is readable instead of crashing the tool.
     with _open_workspace_text_file(root, path, errors="replace") as file:
         bytes_total = os.fstat(file.fileno()).st_size
-        if offset:
-            skipped = file.read(offset)
-            if len(skipped) < offset:
+        skipped = 0
+        while skipped < offset:
+            chunk = file.read(min(offset - skipped, 64 * 1024))
+            if not chunk:
                 # Offset is past the end of the file; nothing left to read.
                 relative_path = _relative_path(root, path)
                 return NativeToolResult(
@@ -145,13 +146,14 @@ def _read_text_file(root: Path, arguments: Mapping[str, object]) -> NativeToolRe
                         "offset": offset,
                         "offset_unit": "chars",
                         "next_offset": None,
-                        "chars_total": len(skipped),
+                        "chars_total": skipped,
                         "chars_total_known": True,
                         "bytes_total": bytes_total,
                         "truncated": False,
                     },
                     refs=(relative_path,),
                 )
+            skipped += len(chunk)
         window = file.read(max_chars + 1)
     content = window[:max_chars]
     truncated = len(window) > max_chars

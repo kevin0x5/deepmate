@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,7 +19,7 @@ from deepmate.providers import (
     ModelToolResult,
 )
 from deepmate.storage.atomic import atomic_write_json, atomic_write_text, file_lock
-from deepmate.storage.jsonl import JsonlWriter
+from deepmate.storage.jsonl import JsonlWriter, iter_jsonl_objects
 from deepmate.storage.tool_output_store import tool_output_ref_value
 
 
@@ -623,7 +623,8 @@ class TranscriptStore:
         self.path = Path(path)
         self.session_id = (session_id or uuid4().hex).strip()
         self.writer = JsonlWriter(self.path)
-        self._sequence = _existing_jsonl_max_sequence(self.path)
+        self._sequence = 0
+        self._signature: tuple[int, ...] | None = None
         if not self.session_id:
             raise ValueError("session_id is required")
 
@@ -633,8 +634,15 @@ class TranscriptStore:
             raise ValueError("conversation item must be ready")
         if item.message is not None and item.message.role == MessageRole.SYSTEM:
             return None
-        with file_lock(self.path):
-            self._sequence = _existing_jsonl_max_sequence(self.path)
+        with (
+            file_lock(self.path),
+            open(self.path, "a+b", opener=lambda path, flags: os.open(path, flags, 0o600)) as file,
+        ):
+            stat = os.fstat(file.fileno())
+            if os.name == "posix" and stat.st_mode & 0o077:
+                os.fchmod(file.fileno(), stat.st_mode & 0o600)
+            if _transcript_signature(stat) != self._signature:
+                self._sequence = _existing_jsonl_max_sequence(self.path)
             next_sequence = self._sequence + 1
             record = TranscriptRecord.from_item(
                 session_id=self.session_id,
@@ -648,12 +656,15 @@ class TranscriptStore:
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as file:
-                file.write(line + "\n")
-                file.flush()
-                os.fsync(file.fileno())
+            if stat.st_size:
+                file.seek(-1, os.SEEK_END)
+                if file.read(1) != b"\n":
+                    file.write(b"\n")
+            file.write((line + "\n").encode("utf-8"))
+            file.flush()
+            os.fsync(file.fileno())
             self._sequence = next_sequence
+            self._signature = _transcript_signature(os.fstat(file.fileno()))
             return record
 
     def load_items(self) -> tuple[ModelConversationItem, ...]:
@@ -669,44 +680,40 @@ class TranscriptStore:
         """Load transcript items with a sequence greater than the given value."""
         return tuple(
             item
-            for record in self.load_records()
-            if record.sequence > sequence
+            for record in self._records_after(sequence)
             for item in (record.to_item(),)
             if item is not None
         )
 
     def load_records(self) -> tuple[TranscriptRecord, ...]:
         """Load stored transcript records in sequence order."""
-        if not self.path.exists():
-            return ()
-        records: list[TranscriptRecord] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(raw, dict):
-                continue
+        return tuple(sorted(self.iter_records(), key=lambda record: record.sequence))
+
+    def _records_after(self, sequence: int) -> tuple[TranscriptRecord, ...]:
+        records = (record for record in self.iter_records() if record.sequence > sequence)
+        return tuple(sorted(records, key=lambda record: record.sequence))
+
+    def iter_records(self) -> Iterator[TranscriptRecord]:
+        """Yield valid records in physical file order without retaining prior rows."""
+        for raw in iter_jsonl_objects(self.path):
             record = TranscriptRecord.from_record(raw)
             if record.is_ready():
-                records.append(record)
-        records.sort(key=lambda record: record.sequence)
-        return tuple(records)
+                yield record
 
     def truncate_after(self, sequence: int) -> int:
         """Rewrite transcript to keep only records up to sequence."""
         keep_until = max(0, int(sequence))
-        kept = tuple(
-            record for record in self.load_records() if record.sequence <= keep_until
-        )
-        lines = "\n".join(
-            json.dumps(record.to_record(), ensure_ascii=False, separators=(",", ":"))
-            for record in kept
-        )
-        atomic_write_text(self.path, (lines + "\n") if lines else "")
-        self._sequence = _existing_jsonl_max_sequence(self.path)
+        with file_lock(self.path):
+            kept = tuple(
+                record for record in self.load_records() if record.sequence <= keep_until
+            )
+            lines = "\n".join(
+                json.dumps(record.to_record(), ensure_ascii=False, separators=(",", ":"))
+                for record in kept
+            )
+            atomic_write_text(self.path, (lines + "\n") if lines else "")
+            self._sequence = kept[-1].sequence if kept else 0
+            self._signature = _transcript_signature(self.path.stat())
         return len(kept)
 
 
@@ -748,13 +755,10 @@ class SessionSummaryStore:
 
 def _item_payload(item: ModelConversationItem) -> tuple[str, dict[str, object]]:
     if item.message is not None:
-        return (
-            "message",
-            {
-                "role": item.message.role.value,
-                "content": item.message.content,
-            },
-        )
+        payload = {"role": item.message.role.value, "content": item.message.content}
+        if item.message.role == MessageRole.ASSISTANT and item.assistant_reasoning:
+            payload["assistant_reasoning"] = item.assistant_reasoning
+        return "message", payload
     if item.tool_exchange is not None:
         return "tool_exchange", _tool_exchange_payload(item.tool_exchange)
     raise ValueError("conversation item requires message or tool exchange")
@@ -770,7 +774,13 @@ def _item_from_record(record: dict[str, Any]) -> ModelConversationItem | None:
         content = str(payload.get("content", ""))
         if role is None or not content.strip():
             return None
-        return ModelConversationItem.from_message(Message(role=role, content=content))
+        reasoning = payload.get("assistant_reasoning")
+        return ModelConversationItem.from_message(
+            Message(role=role, content=content),
+            assistant_reasoning=(
+                reasoning if role == MessageRole.ASSISTANT and isinstance(reasoning, str) else ""
+            ),
+        )
     if kind == "tool_exchange":
         exchange = _tool_exchange_from_payload(payload)
         if exchange.is_ready():
@@ -963,21 +973,15 @@ def _session_title(value: object) -> str:
     return title or "Untitled session"
 
 
+def _transcript_signature(stat: os.stat_result) -> tuple[int, ...]:
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
 def _existing_jsonl_max_sequence(path: Path) -> int:
-    if not path.exists():
-        return 0
     max_sequence = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
+    for record in iter_jsonl_objects(path):
         try:
             max_sequence = max(max_sequence, int(record.get("sequence", 0)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
     return max_sequence

@@ -35,10 +35,14 @@ def trial_metrics(
     cache_hit_tokens = 0
     cache_miss_tokens = 0
     reasoning_tokens = 0
+    metered_steps = 0
+    discounted_tokens = 0
     for step in result.steps:
         usage = step.response.usage
         if usage is None:
             continue
+        metered_steps += int(usage.totals_reported)
+        discounted_tokens += min(usage.input_tokens, usage.cache_hit_input_tokens)
         input_tokens += usage.input_tokens
         output_tokens += usage.output_tokens
         cache_hit_tokens += usage.cache_hit_input_tokens
@@ -53,27 +57,28 @@ def trial_metrics(
     raw_peak_memory = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     peak_memory_kib = raw_peak_memory / 1024 if sys.platform == "darwin" else raw_peak_memory
     price = dict(pricing or {})
-    priced = all(
+    usage_complete = bool(result.steps) and metered_steps == len(result.steps)
+    priced = usage_complete and all(
         key in price
         for key in ("input_per_million", "output_per_million", "source", "effective_at")
     )
     cost = None
     if priced:
         input_cost = input_tokens * float(price["input_per_million"])
-        if cache_total and "cache_hit_input_per_million" in price:
+        if "cache_hit_input_per_million" in price:
             input_cost = (
-                cache_hit_tokens * float(price["cache_hit_input_per_million"])
-                + cache_miss_tokens * float(price["input_per_million"])
+                discounted_tokens * float(price["cache_hit_input_per_million"])
+                + (input_tokens - discounted_tokens) * float(price["input_per_million"])
             )
         cost = (
             input_cost + output_tokens * float(price["output_per_million"])
         ) / 1_000_000
     values: dict[str, object] = {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "reasoning_tokens": reasoning_tokens,
-        "cache_hit_tokens": cache_hit_tokens,
-        "cache_miss_tokens": cache_miss_tokens,
+        "input_tokens": input_tokens if usage_complete else None,
+        "output_tokens": output_tokens if usage_complete else None,
+        "reasoning_tokens": reasoning_tokens if usage_complete else None,
+        "cache_hit_tokens": cache_hit_tokens if cache_total else None,
+        "cache_miss_tokens": cache_miss_tokens if cache_total else None,
         "cache_hit_ratio": cache_hit_tokens / cache_total if cache_total else None,
         "tool_schema_tokens": schema_tokens,
         "tool_calls": sum(
@@ -89,7 +94,7 @@ def trial_metrics(
         "runtime_errors": len(result.errors()),
         "latency_seconds": max(0.0, elapsed_seconds),
         "token_per_second": (
-            output_tokens / elapsed_seconds if elapsed_seconds > 0 else None
+            output_tokens / elapsed_seconds if usage_complete and elapsed_seconds > 0 else None
         ),
         "process_peak_memory_kib": peak_memory_kib,
         "context_pressure": max(pressure_values, default=0.0),
@@ -131,22 +136,26 @@ def aggregate_metrics(results: Iterable[EvalCaseResult]) -> EvalMetrics:
         "reliable_task_horizon": _reliable_horizon(items),
     }
     numeric_keys = (
-        "input_tokens",
-        "output_tokens",
-        "reasoning_tokens",
-        "cache_hit_tokens",
-        "cache_miss_tokens",
         "tool_schema_tokens",
         "tool_calls",
         "tool_errors",
         "latency_seconds",
-        "process_peak_memory_kib",
     )
     for key in numeric_keys:
         values[key] = sum(_float_metric(item, key) for item in items)
-    cache_total = float(values["cache_hit_tokens"]) + float(values["cache_miss_tokens"])
+    for key in ("input_tokens", "output_tokens", "reasoning_tokens"):
+        complete = all(item.metrics.values.get(key) is not None for item in items)
+        values[key] = sum(_float_metric(item, key) for item in items) if complete else None
+    values["process_peak_memory_kib"] = max(
+        _float_metric(item, "process_peak_memory_kib") for item in items
+    )
+    cache_hits = sum(_float_metric(item, "cache_hit_tokens") for item in items)
+    cache_misses = sum(_float_metric(item, "cache_miss_tokens") for item in items)
+    cache_total = cache_hits + cache_misses
+    values["cache_hit_tokens"] = cache_hits if cache_total else None
+    values["cache_miss_tokens"] = cache_misses if cache_total else None
     values["cache_hit_ratio"] = (
-        float(values["cache_hit_tokens"]) / cache_total if cache_total else None
+        cache_hits / cache_total if cache_total else None
     )
     latencies = sorted(_float_metric(item, "latency_seconds") for item in items)
     values["p95_latency_seconds"] = _percentile(latencies, 0.95)

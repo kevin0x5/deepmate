@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 from deepmate.foundation.time import normal_datetime, utc_isoformat
 from deepmate.storage.atomic import atomic_write_json, atomic_write_text, file_lock
+from deepmate.tasks.json_helpers import contract_status_items
 from deepmate.tasks.render import TaskDocuments, TaskStage, build_task_context
 
 TASK_DIR = Path("task")
@@ -44,6 +45,7 @@ class TaskModeState:
     execute_turns: int = 0
     last_reason: str = ""
     next_instruction: str = ""
+    contract_status: tuple[str, ...] = ()
 
     def to_record(self) -> dict[str, object]:
         """Return a JSON-serializable local state record."""
@@ -55,6 +57,7 @@ class TaskModeState:
             "execute_turns": self.execute_turns,
             "last_reason": self.last_reason,
             "next_instruction": self.next_instruction,
+            "contract_status": list(self.contract_status),
         }
 
     @classmethod
@@ -65,14 +68,17 @@ class TaskModeState:
         stage = TaskStage.parse(str(record.get("stage", "")))
         if stage is None:
             return None
+        status = str(record.get("execute_status") or "").strip()
+        instruction = str(record.get("next_instruction") or "").strip()
         return cls(
             stage=stage,
             updated_at=str(record.get("updated_at", "")).strip(),
             last_session_id=str(record.get("last_session_id", "")).strip(),
-            execute_status=str(record.get("execute_status", "")).strip(),
+            execute_status=status,
             execute_turns=_int_record_value(record.get("execute_turns")),
             last_reason=str(record.get("last_reason", "")).strip(),
-            next_instruction=str(record.get("next_instruction", "")).strip(),
+            next_instruction="" if status == "achieved" else instruction,
+            contract_status=contract_status_items(record.get("contract_status")),
         )
 
 
@@ -173,62 +179,49 @@ class TaskStore:
         now: datetime | None = None,
         execute_status: str = "",
         execute_turns: int | None = None,
-        last_reason: str = "",
-        next_instruction: str = "",
+        last_reason: str | None = None,
+        next_instruction: str | None = None,
+        contract_status: tuple[str, ...] | None = None,
     ) -> TaskModeState:
         """Persist the local task stage cursor."""
-        previous = self.read_state()
-        if stage == TaskStage.CHECKPOINT:
-            stage = previous.stage if previous is not None else TaskStage.PLAN
-        if stage != TaskStage.PLAN and not has_real_user_plan(
-            _read_text(self.plan_path)
-        ):
-            raise ValueError(
-                "Task Mode needs a real task/plan.md before persisting execute state"
-            )
-        current = utc_isoformat(normal_datetime(now))
-        state = TaskModeState(
-            stage=stage,
-            updated_at=current,
-            last_session_id=session_id.strip(),
-            execute_status=(
-                execute_status.strip()
-                if execute_status.strip()
-                else (
-                    previous.execute_status
-                    if previous is not None and stage == TaskStage.EXECUTE
-                    else ""
-                )
-            ),
-            execute_turns=(
-                max(0, execute_turns)
-                if execute_turns is not None
-                else (
-                    previous.execute_turns
-                    if previous is not None and stage == TaskStage.EXECUTE
-                    else 0
-                )
-            ),
-            last_reason=(
-                last_reason.strip()
-                if last_reason.strip()
-                else (
-                    previous.last_reason
-                    if previous is not None and stage == TaskStage.EXECUTE
-                    else ""
-                )
-            ),
-            next_instruction=(
-                next_instruction.strip()
-                if next_instruction.strip()
-                else (
-                    previous.next_instruction
-                    if previous is not None and stage == TaskStage.EXECUTE
-                    else ""
-                )
-            ),
-        )
         with file_lock(self.state_path):
+            previous = self.read_state()
+            if stage == TaskStage.CHECKPOINT:
+                stage = previous.stage if previous is not None else TaskStage.PLAN
+            if stage != TaskStage.PLAN and not has_real_user_plan(
+                _read_text(self.plan_path)
+            ):
+                raise ValueError(
+                    "Task Mode needs a real task/plan.md before persisting execute state"
+                )
+            current = utc_isoformat(normal_datetime(now))
+            prior = previous if stage == TaskStage.EXECUTE else None
+            status = execute_status.strip() or (prior.execute_status if prior else "")
+            instruction = (
+                next_instruction.strip() if next_instruction is not None
+                else (prior.next_instruction if prior else "")
+            )
+            state = TaskModeState(
+                stage=stage,
+                updated_at=current,
+                last_session_id=session_id.strip(),
+                execute_status=status,
+                execute_turns=(
+                    max(0, execute_turns)
+                    if execute_turns is not None
+                    else (prior.execute_turns if prior else 0)
+                ),
+                last_reason=(
+                    last_reason.strip()
+                    if last_reason is not None
+                    else (prior.last_reason if prior else "")
+                ),
+                next_instruction="" if status == "achieved" else instruction,
+                contract_status=(
+                    contract_status if contract_status is not None
+                    else (prior.contract_status if prior else ())
+                ),
+            )
             atomic_write_json(self.state_path, state.to_record())
         return state
 
